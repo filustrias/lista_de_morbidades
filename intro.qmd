@@ -1,0 +1,833 @@
+# Tabela Fato pacientes - Morbidades e fármacos de uso crônico para cada paciente
+
+Aqui está a query para a categorização de cada paciente, de acordo com área programática, clínica da família e ESF para cada morbidade listada.
+
+ESFs divididas em sub-ESF (1, 2, 3) foram agregadas em uma única ESF.
+
+A maioria de condições foi categorizada apenas com CIDs, mas há condições específicas que foram categorizadas também por outros critérios clínicos:
+
+-   Hipertensão arterial - CIDs, valores de pressão arterial e prescrição de medicamentos
+
+-   Diabetes Mellitus - CIDs, valores laboratoriais e medicamentos
+
+-   Obesidade - CID e medidas corporais
+
+-   HIV-SIDA - CIDs, solicitação de exames, prescrição de antiretrovirais
+
+-   Doença renal crônica - CIDs e critérios clínicos de acordo com taxa de filtração glomerular estimada
+
+Além disso, há duas outras condições clínicas relacionadas ao uso de medicamentos crônicos:
+
+-   Polifarmácia - 5 ou mais medicamentos crônicos
+
+-   Hiperpolifarmácia - 10 ou mais medicamentos crônicos
+
+Ao final, é calculada a **Multimorbidade, considerada aqui como ocorrência de duas ou mais condições crônicas em um mesmo indivíduo**.
+
+Nem todas as morbidades aqui capturadas foram utilizadas para o cálculo da Multimorbidade. As condiç;ões mantidas para o cálculo da Multimorbidade foram as seguintes:
+
+Hipertensão Arterial, Diabetes Mellitus, Cardiopatia Isquêmica, Insuficiência Cardíaca, AVC, Insuficiência Renal Crônica, Demência, Doenpça Pulmonar Obstrutiva Crônica, Úlcera Péptica, Neoplasias, Doença Hepática, HIV/AIDS, Doenças da Tireoide, Arritmia, Distúrbio de Coagulação, Doença Reumatológica, Doença Valvular, Doença Circulatória Pulmonar, Doença Neurológica, Doença Vascular Periférica, Plegias e deficiências motoras, Anemia, Transtorno por Uso de Álcool, Transtorno por Uso de Drogas, Psicoses e esquizofrenia, Desnutrição, Deficiência Intelectual, Doença Ocular e perda de visão, Doenças dos ouvidos e perda de audição, Condição Dolorosa Crônica, Bronquiectasia.
+
+A tabela morbidades está aqui - rj-sms-sandbox.sub_pav_us.morbidades_20251015
+
+
+
+## Abaixo a query que gera estas informações:
+
+```{r}
+
+#| eval: false   # não executa
+#| echo: true    # exibe o código
+#| include: true # garante que o chunk aparece no documento
+
+
+-- ============================================
+-- TABELA FATO MORBIDADES - VERSÃO LIMPA
+-- Apenas morbidades + medicamentos crônicos
+-- ============================================
+
+
+
+WITH 
+-- CTE 0: Identificação de pacientes com HIV/AIDS
+hiv_cpf_raw AS (
+  SELECT
+    h.id_prontuario_global,
+    h.id_cnes,
+    h.aids_doenca_atual_ano_1_teste,
+    a.patient_cpf AS patient_cpf_raw,
+    REGEXP_REPLACE(CAST(a.patient_cpf AS STRING), r'\D', '') AS cpf
+  FROM `rj-sms.brutos_prontuario_vitacare_historico.hiv` AS h
+  JOIN `rj-sms.brutos_prontuario_vitacare_historico.acto` AS a
+  USING (id_prontuario_global)
+  WHERE NULLIF(TRIM(CAST(a.patient_cpf AS STRING)), '') IS NOT NULL
+),
+
+hiv_cpf AS (
+  SELECT *
+  FROM hiv_cpf_raw
+  WHERE LENGTH(cpf) = 11
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY id_prontuario_global DESC) = 1
+),
+
+exames_cpf_raw AS (
+  SELECT
+    ea.id_hci,
+    ea.entrada_data,
+    ea.paciente_cpf AS paciente_cpf_raw,
+    er.tipo,
+    er.descricao,
+    REGEXP_REPLACE(CAST(ea.paciente_cpf AS STRING), r'\D', '') AS cpf
+  FROM `rj-sms.saude_historico_clinico.episodio_assistencial` AS ea
+  CROSS JOIN UNNEST(ea.exames_realizados) AS er
+  WHERE ea.exames_realizados IS NOT NULL
+    AND ARRAY_LENGTH(ea.exames_realizados) > 0
+    AND er.descricao IS NOT NULL
+    AND REGEXP_CONTAINS(er.descricao, r'(?i)\b(cd4|cv|carga viral)\b')
+    AND NULLIF(TRIM(CAST(ea.paciente_cpf AS STRING)), '') IS NOT NULL
+),
+
+exames_cpf_last AS (
+  SELECT *
+  FROM exames_cpf_raw
+  WHERE LENGTH(cpf) = 11
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY cpf
+    ORDER BY entrada_data DESC, id_hci DESC
+  ) = 1
+),
+
+hiv_completo AS (
+  SELECT
+    h.cpf,
+    h.id_prontuario_global,
+    h.id_cnes,
+    h.aids_doenca_atual_ano_1_teste,
+    e.entrada_data AS data_ultimo_exame
+  FROM hiv_cpf AS h
+  LEFT JOIN exames_cpf_last AS e
+  USING (cpf)
+),
+
+-- CTE: Pacientes com DRC por eGFR
+drc_egfr AS (
+  SELECT DISTINCT cpf
+  FROM `rj-sms-sandbox.sub_pav_us.MM_eGFR`
+  WHERE ckd_stage IN (
+    'G2 - Levemente diminuída',
+    'G3 - Moderadamente diminuída',
+    'G4 - Severamente diminuída',
+    'G5 - Falência renal'
+  )
+),
+
+-- CTE 1: Agregação dos episódios assistenciais
+episodios_agregados AS (
+  SELECT 
+    ep.paciente.cpf,
+    ep.id_hci,
+    ep.entrada_data,
+    ep.profissional_saude_responsavel.nome AS profissional_nome,
+    ep.profissional_saude_responsavel.especialidade AS profissional_especialidade,
+    ep.paciente.id_paciente AS id_paciente,
+    ep.paciente.data_nascimento AS data_nascimento,
+    ep.medidas.altura AS altura,
+    ep.medidas.peso AS peso,
+    ep.medidas.circunferencia_abdominal AS circunferencia_abdominal,
+    ep.medidas.glicemia AS glicemia,
+    ep.medidas.hemoglobina_glicada AS hemoglobina_glicada,
+    ep.medidas.pressao_sistolica AS pressao_sistolica,
+    ep.medidas.pressao_diastolica AS pressao_diastolica,
+    STRING_AGG(CAST(condicao.id AS STRING), "/" ORDER BY condicao.id) AS condicoes_ids,
+    STRING_AGG(condicao.descricao, "/" ORDER BY condicao.id) AS condicoes_descricoes,
+    STRING_AGG(CAST(prescricao.id AS STRING), "/" ORDER BY prescricao.id) AS prescricoes_ids,
+    STRING_AGG(prescricao.nome, "/" ORDER BY prescricao.id) AS prescricoes_nomes
+  FROM `rj-sms.saude_historico_clinico.episodio_assistencial` ep
+  LEFT JOIN UNNEST(ep.condicoes) AS condicao
+  LEFT JOIN UNNEST(ep.prescricoes) AS prescricao
+  WHERE ep.paciente.cpf IS NOT NULL
+  GROUP BY 
+    ep.paciente.cpf, ep.id_hci, ep.entrada_data,
+    ep.profissional_saude_responsavel.nome, ep.profissional_saude_responsavel.especialidade,
+    ep.paciente.id_paciente, ep.paciente.data_nascimento,
+    ep.medidas.altura, ep.medidas.peso, ep.medidas.circunferencia_abdominal,
+    ep.medidas.glicemia, ep.medidas.hemoglobina_glicada,
+    ep.medidas.pressao_sistolica, ep.medidas.pressao_diastolica
+),
+
+-- CTE 2: Junção com dados dos pacientes e estabelecimentos
+base_dados AS (
+  SELECT 
+    p.cpf,
+    p.dados.nome,
+    CASE 
+        WHEN UPPER(pac_vitacare.sexo) IN ('MALE', 'MASCULINO') THEN 'masculino'
+        WHEN UPPER(pac_vitacare.sexo) IN ('FEMALE', 'FEMININO') THEN 'feminino'
+        ELSE NULL
+    END AS genero,
+    p.dados.raca, 
+    p.dados.obito_indicador, 
+    p.dados.obito_data, 
+    p.equipe_saude_familia[SAFE_OFFSET(0)].id_ine AS INE,
+    REGEXP_REPLACE(
+      p.equipe_saude_familia[SAFE_OFFSET(0)].nome, 
+      r'\s+(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|XIII|XIV|XV|XVI|XVII|XVIII|XIX|XX)\s*$', 
+      ''
+    ) AS ESF,
+    p.equipe_saude_familia[SAFE_OFFSET(0)].clinica_familia.id_cnes AS CNES, 
+    REPLACE(p.equipe_saude_familia[SAFE_OFFSET(0)].clinica_familia.nome, 'Policlinica Newton Bethlem', 'CMS Newton Bethlem') AS clinica_familia,
+    ea.id_hci,
+    ea.entrada_data,
+    ea.profissional_nome,
+    ea.profissional_especialidade,
+    ea.id_paciente,
+    ea.data_nascimento,
+    ea.altura,
+    ea.peso,
+    ea.circunferencia_abdominal,
+    ea.glicemia,
+    ea.hemoglobina_glicada,
+    ea.pressao_sistolica,
+    ea.pressao_diastolica,
+    ea.condicoes_ids,
+    ea.condicoes_descricoes,
+    ea.prescricoes_ids,
+    ea.prescricoes_nomes,
+    est.id_unidade,
+    est.nome_limpo AS estabelecimento_nome,
+    est.area_programatica
+  FROM `rj-sms.saude_historico_clinico.paciente` p
+  LEFT JOIN episodios_agregados ea ON p.cpf = ea.cpf
+  LEFT JOIN `rj-sms.saude_dados_mestres.estabelecimento` est 
+    ON p.equipe_saude_familia[SAFE_OFFSET(0)].clinica_familia.id_cnes = est.id_cnes
+  LEFT JOIN `rj-sms.brutos_prontuario_vitacare.paciente` pac_vitacare
+    ON p.cpf = pac_vitacare.cpf
+  WHERE 
+    NOT REGEXP_CONTAINS(UPPER(COALESCE(p.equipe_saude_familia[SAFE_OFFSET(0)].nome, '')), r'ESB')
+    AND p.equipe_saude_familia[SAFE_OFFSET(0)].nome IS NOT NULL
+    AND TRIM(p.equipe_saude_familia[SAFE_OFFSET(0)].nome) != ''
+    AND est.area_programatica IS NOT NULL
+    AND p.equipe_saude_familia[SAFE_OFFSET(0)].clinica_familia.nome IS NOT NULL
+    AND p.cpf IS NOT NULL
+    AND ea.id_paciente IS NOT NULL
+    AND (p.dados.obito_indicador = FALSE OR p.dados.obito_indicador IS NULL)
+    AND p.dados.obito_data IS NULL
+),
+
+-- CTE 3: Identificação de morbidades
+morbidades_temp AS (
+  SELECT 
+    *,
+    -- Hipertensão
+    CASE WHEN (
+      REGEXP_CONTAINS(condicoes_ids, r'I10|I11|I12|I13|I14|I15|I16|O100|O104|O109|O13|R030')
+      OR pressao_sistolica > 180 OR pressao_diastolica > 110
+      OR REGEXP_CONTAINS(prescricoes_nomes, r'HIDROCLOROTIAZIDA|CLORTALIDONA|INDAPAMIDA|FUROSEMIDA|ESPIRONOLACTONA|CAPTOPRIL|ENALAPRIL|LISINOPRIL|RAMIPRIL|PERINDOPRIL|BENAZEPRIL|LOSARTANA|VALSARTANA|CANDESARTANA|IRBESARTANA|OLMESARTANA|TELMISARTANA|ANLODIPINO|NIFEDIPINO|FELODIPINO|VERAPAMIL|DILTIAZEM|ATENOLOL|PROPRANOLOL|METOPROLOL|CARVEDILOL|BISOPROLOL|METILDOPA|CLONIDINA|HIDRALAZINA|NITROPRUSSETO DE SÓDIO|ALISQUIRENO')
+    ) THEN TRUE ELSE FALSE END AS HAS_temp,
+    
+    -- Diabetes
+    CASE WHEN (
+      REGEXP_CONTAINS(condicoes_ids, r'E10|E11|E12|E13|E14|O24|H360|H280|G632|G590|G990|N083|M142')
+      OR glicemia >= 126 OR hemoglobina_glicada >= 6.5
+      OR REGEXP_CONTAINS(prescricoes_nomes, r'METFORMINA|GLIFAGE|GLICLAZIDA|GLIBENCLAMIDA|DAPAGLIFOZINA|INSULINA|NPH|GLIMEPIRID|GLIPIZIDA|REPAGLINIDA|NATEGLINIDA|GLITAZONA|GLIPTINA|GLIFOZINA|EXENATIDA|DULAGLUTIDA|SEMAGLUTIDA|LIXISENATIDA|TIRZEPATIDA|LISPRO|ASPARTE|GLULISINA|GLARGINA|DETEMIR|DEGLUDECA')
+    ) THEN TRUE ELSE FALSE END AS DM_temp,
+    
+    -- Pré-diabetes
+    CASE WHEN ((glicemia >= 100 AND glicemia < 126) OR (hemoglobina_glicada >= 5.7 AND hemoglobina_glicada < 6.5))
+    THEN TRUE ELSE FALSE END AS pre_DM_temp,
+    
+    -- Cardiopatia isquêmica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I21|I22|I252') THEN TRUE ELSE FALSE END AS CI_temp,
+    
+    -- Insuficiência cardíaca
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I110|I130|I132|I420|I425|I426|I427|I428|I429|I43|I50|I517|P290') THEN TRUE ELSE FALSE END AS ICC_temp,
+    
+    -- AVC
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I6|G45|G46|H340') THEN TRUE ELSE FALSE END AS stroke_temp,
+    
+    -- Doença renal crônica (CID + eGFR)
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I120|I131|N032|N033|N034|N035|N036|N037|N052|N053|N054|N055|N056|N057|N18|N19|N250|Z490|Z491|Z492|Z940|Z992') THEN TRUE ELSE FALSE END AS IRC_CID_temp,
+    
+    -- Demência
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F00|F01|F02|F03|F051|G30|G310|G311') THEN TRUE ELSE FALSE END AS dementia_temp,
+    
+    -- DPOC
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I278|I279|J4|J60|J61|J62|J63|J64|J65|J66|J67|J684|J701|J703') THEN TRUE ELSE FALSE END AS COPD_temp,
+    
+    -- Úlcera péptica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'K25|K26|K27|K28') THEN TRUE ELSE FALSE END AS peptic_temp,
+    
+    -- Neoplasias
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC50\d*\b') THEN TRUE ELSE FALSE END AS neo_mama_temp,
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC53\d*\b') THEN TRUE ELSE FALSE END AS neo_colo_temp,
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC5(1|2|4|5|6|7|8)\d*\b') THEN TRUE ELSE FALSE END AS neo_fem_estrita_temp,
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC6(0|1|2|3)\d*\b') THEN TRUE ELSE FALSE END AS neo_masc_estrita_temp,
+    CASE 
+      WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC(0[0-9]|[12][0-9]|3[0-9]|4[0-9]|5[0-9]|6[0-9]|7[0-9]|8[0-9]|9[0-7])\d*\b')
+       AND NOT REGEXP_CONTAINS(condicoes_ids, r'\bC50\d*\b')
+       AND NOT REGEXP_CONTAINS(condicoes_ids, r'\bC53\d*\b')
+       AND NOT REGEXP_CONTAINS(condicoes_ids, r'\bC5(1|2|4|5|6|7|8)\d*\b')
+       AND NOT REGEXP_CONTAINS(condicoes_ids, r'\bC6(0|1|2|3)\d*\b')
+       AND NOT REGEXP_CONTAINS(condicoes_ids, r'\bC44\d*\b')
+    THEN TRUE ELSE FALSE 
+    END AS neo_ambos_temp,
+    
+    -- Doença hepática
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'B18|I85|I859|I864|I982|K700|K701|K702|K703|K704|K709|K711|K713|K715|K717|K721|K729|K73|K74|K760|K762|K763|K764|K765|K766|K767|K768|K769|Z944') THEN TRUE ELSE FALSE END AS liver_temp,
+    
+    -- HIV/AIDS (critérios combinados: CID + ARV + base HIV)
+    CASE WHEN (
+      REGEXP_CONTAINS(condicoes_ids, r'B20|B21|B22|B24|Z21|R75|O987|P352')
+      OR REGEXP_CONTAINS(prescricoes_nomes, r'(?i)\b(ABACAVIR|ABC|ZIDOVUDINA|AZT|LAMIVUDINA|3TC|EMTRICITABINA|FTC|TENOFOVIR(?:\s+(?:DISOPROXIL|FUMARATO|ALAFENAMIDA))?|TDF|TAF|DIDANOSINA|DDI|ESTAVUDINA|D4T|EFAVIRENZ|NEVIRAPINA|ETRAVIRINA|RILPIVIRINA|DORAVIRINA|ATAZANAVIR|DARUNAVIR|LOPINAVIR|SAQUINAVIR|INDINAVIR|NELFINAVIR|FOSAMPRENAVIR|AMPRENAVIR|TIPRANAVIR|RITONAVIR|COBICISTAT|COBICISTATE|RALTEGRAVIR|ELVITEGRAVIR|DOLUTEGRAVIR|BICTEGRAVIR|CABOTEGRAVIR|MARAVIROC|MARAVIROQUE|ENFUVIRTIDA|FOSTEMSAVIR|IBALIZUMABE|LENACAPAVIR)\b')
+    ) THEN TRUE ELSE FALSE END AS SIDA_temp,
+    
+    -- Doenças da tireóide
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'E00|E01|E02|E03|E890|E05|E06') THEN TRUE ELSE FALSE END AS tireoide_temp,
+    
+    -- Arritmias
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I441|I442|I443|I456|I459|I47|I48|I49|R000|R001|R008|T821|Z450|Z950') THEN TRUE ELSE FALSE END AS arritmia_temp,
+    
+    -- Distúrbio de coagulação
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'D65|D66|D67|D68|D691|D693|D694|D695|D696') THEN TRUE ELSE FALSE END AS coagulo_temp,
+    
+    -- Doença reumatológica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'L93|L940|L941|L943|M05|M06|M08|M120|M123|M30|M310|M313|M32|M33|M34|M35|M45|M461|M468|M469') THEN TRUE ELSE FALSE END AS reumato_temp,
+    
+    -- Doença valvular
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'A520|I05|I06|I07|I08|I091|I098|I34|I35|I36|I37|I38|I39|Q230|Q231|Q232|Q233|Z952|Z953|Z954') THEN TRUE ELSE FALSE END AS valvular_temp,
+    
+    -- Doença circulatória pulmonar
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I26|I27|I280|I288|I289') THEN TRUE ELSE FALSE END AS circ_pulm_temp,
+    
+    -- Doença neurológica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'G10|G11|G12|G13|G20|G21|G22|G254|G255|G312|G318|G319|G32|G35|G36|G37|G40|G41|G931|G934|R470|R56') THEN TRUE ELSE FALSE END AS neuro_temp,
+    
+    -- Doença vascular periférica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'I70|I71|I731|I738|I739|I771|I790|I792|K551|K558|K559|Z958|Z959') THEN TRUE ELSE FALSE END AS vascular_periferica_temp,
+    
+    -- Plegia
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'G041|G114|G801|G802|G81|G82|G830|G831|G832|G833|G834|G839') THEN TRUE ELSE FALSE END AS plegia_temp,
+    
+    -- Dislipidemia
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'E78') THEN TRUE ELSE FALSE END AS dislipidemia_temp,
+    
+    -- Obesidade
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'E66') THEN TRUE ELSE FALSE END AS obesidade_temp,
+    
+    -- Anemias
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'D50|D51|D52|D53') THEN TRUE ELSE FALSE END AS anemias_temp,
+    
+    -- Transtorno por uso de álcool
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F10|E52|G621|I426|K292|K700|K703|K709|T51|Z502|Z714|Z721') THEN TRUE ELSE FALSE END AS alcool_temp,
+    
+    -- Transtorno por uso de drogas
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F11|F12|F13|F14|F15|F16|F18|F19|Z715|Z722') THEN TRUE ELSE FALSE END AS drogas_temp,
+    
+    -- Tabagismo
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F17|Z716') THEN TRUE ELSE FALSE END AS tabaco_temp,
+    
+    -- Psicoses
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F20|F21|F22|F23|F24|F25|F28|F29|F31') THEN TRUE ELSE FALSE END AS psicoses_temp,
+    
+    -- Depressão e ansiedade
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F32|F33|F34|F38|F39|F40|F41') THEN TRUE ELSE FALSE END AS depre_ansiedade_temp,
+    
+    -- Desnutrição
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'E40|E41|E42|E43|E45|E46') THEN TRUE ELSE FALSE END AS desnutricao_temp,
+    
+    -- Deficiência intelectual
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'F70|F71|F72|F73|F78|F79') THEN TRUE ELSE FALSE END AS retardo_mental_temp,
+    
+    -- Deficiência motora
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'G041|G114|G801|G802|G81|G82|G830|G831|G832|G833|G834|G839|R26') THEN TRUE ELSE FALSE END AS descapacidade_motora_temp,
+    
+    -- Doenças oculares
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'H18|H201|H25|H26|H33|H360|H40|H42|H46|H540') THEN TRUE ELSE FALSE END AS olhos_temp,
+    
+    -- Perda auditiva
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'H90|H91') THEN TRUE ELSE FALSE END AS ouvidos_temp,
+    
+    -- Malformações congênitas
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'Q00|Q01|Q02|Q03|Q04|Q05|Q06|Q07|Q35|Q36|Q37|Q60|Q61|Q62|Q80|Q81|Q90|Q91|Q92|Q93|Q94|Q95|Q96|Q97|Q98|Q99') THEN TRUE ELSE FALSE END AS ma_formacoes_temp,
+    
+    -- Doenças de pele
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'L10|L12|L13|L14|L20|L40|L41|L43|L80|L89|L90|L990|Q850|Q851') THEN TRUE ELSE FALSE END AS pele_temp,
+    
+    -- Condição dolorosa crônica
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'G89|M54|M79[01247]|M25[56]|R52') THEN TRUE ELSE FALSE END AS painful_temp,
+    
+    -- Asma
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'J45|J46') THEN TRUE ELSE FALSE END AS asthma_temp,
+    
+    -- Doença diverticular
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'K57') THEN TRUE ELSE FALSE END AS diverticular_temp,
+    
+    -- Doença da próstata
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'N40|N41|N42') THEN TRUE ELSE FALSE END AS prostate_temp,
+    
+    -- Epilepsia
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'G40|G41') THEN TRUE ELSE FALSE END AS epilepsy_temp,
+    
+    -- Doença inflamatória intestinal
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'K50|K51') THEN TRUE ELSE FALSE END AS ibd_temp,
+    
+    -- Bronquiectasia
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'J47') THEN TRUE ELSE FALSE END AS bronchiectasis_temp,
+    
+    -- Leucemias
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC9[1-5]\d*\b') THEN TRUE ELSE FALSE END AS leukemia_temp,
+    
+    -- Linfomas
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC8[1-6]\d*\b|\bC96\d*\b') THEN TRUE ELSE FALSE END AS lymphoma_temp,
+    
+    -- Câncer metastático
+    CASE WHEN REGEXP_CONTAINS(condicoes_ids, r'\bC7[7-9]\d*\b|\bC80\d*\b') THEN TRUE ELSE FALSE END AS metastasis_temp,
+    
+    -- Auxiliares para progressão
+    CASE WHEN ((pressao_sistolica >= 140 AND pressao_sistolica < 180) OR (pressao_diastolica >= 90 AND pressao_diastolica < 110))
+    THEN TRUE ELSE FALSE END AS primeira_medida,
+    
+    -- Contadores
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY entrada_data) AS numero_consulta,
+    SUM(CASE WHEN profissional_especialidade LIKE '%Médico%' THEN 1 ELSE 0 END) 
+      OVER (PARTITION BY cpf ORDER BY entrada_data ROWS UNBOUNDED PRECEDING) AS contador_medico,
+    SUM(CASE WHEN profissional_especialidade LIKE '%Enfermeiro%' THEN 1 ELSE 0 END) 
+      OVER (PARTITION BY cpf ORDER BY entrada_data ROWS UNBOUNDED PRECEDING) AS contador_enfermeiro,
+    SUM(CASE WHEN ((glicemia >= 100 AND glicemia < 126) OR (hemoglobina_glicada >= 5.7 AND hemoglobina_glicada < 6.5)) THEN 1 ELSE 0 END) 
+      OVER (PARTITION BY cpf ORDER BY entrada_data ROWS UNBOUNDED PRECEDING) AS contador_pre_dm,
+    SUM(CASE WHEN (pressao_sistolica > 140 OR pressao_diastolica > 90) THEN 1 ELSE 0 END) 
+      OVER (PARTITION BY cpf ORDER BY entrada_data ROWS UNBOUNDED PRECEDING) AS contador_pressao_alta
+  FROM base_dados
+),
+
+-- CTE 4: Ajustes de progressão
+dados_progressao AS (
+  SELECT 
+    *,
+    CASE WHEN contador_pre_dm >= 2 THEN TRUE ELSE DM_temp END AS DM_ajustado,
+    CASE WHEN DM_temp = TRUE OR contador_pre_dm >= 2 THEN FALSE ELSE pre_DM_temp END AS pre_DM_ajustado,
+    CASE WHEN contador_pressao_alta >= 2 THEN TRUE ELSE HAS_temp END AS HAS_ajustado,
+    DATE_DIFF(CURRENT_DATE(), data_nascimento, YEAR) AS idade
+  FROM morbidades_temp
+),
+
+-- CTE 5: Persistência das morbidades
+dados_finais AS (
+  SELECT 
+    dp.*,
+    hiv.cpf AS hiv_base_cpf,
+    CASE WHEN MAX(CASE WHEN HAS_ajustado THEN 1 ELSE 0 END) 
+              OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS HAS,
+    CASE WHEN MAX(CASE WHEN DM_ajustado THEN 1 ELSE 0 END)  
+              OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS DM,
+    CASE WHEN MAX(CASE WHEN pre_DM_ajustado THEN 1 ELSE 0 END) 
+              OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS pre_DM,
+    CASE WHEN MAX(CASE WHEN CI_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS CI,
+    CASE WHEN MAX(CASE WHEN ICC_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS ICC,
+    CASE WHEN MAX(CASE WHEN stroke_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS stroke,
+    -- IRC com lógica unificada: CID OU eGFR
+    CASE WHEN (
+      MAX(CASE WHEN IRC_CID_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1
+      OR drc.cpf IS NOT NULL
+      ) THEN TRUE ELSE FALSE END AS IRC,
+    CASE WHEN MAX(CASE WHEN dementia_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS dementia,
+    CASE WHEN MAX(CASE WHEN COPD_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS COPD,
+    CASE WHEN MAX(CASE WHEN peptic_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS peptic,
+    CASE WHEN MAX(CASE WHEN neo_mama_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neoplasia_mama,
+    CASE WHEN MAX(CASE WHEN neo_colo_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neoplasia_colo_uterino,
+    CASE WHEN MAX(CASE WHEN neo_fem_estrita_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neoplasia_feminina_estrita,
+    CASE WHEN MAX(CASE WHEN neo_masc_estrita_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neoplasia_masculina_estrita,
+    CASE WHEN MAX(CASE WHEN neo_ambos_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neoplasia_ambos_os_sexos,
+    CASE WHEN MAX(CASE WHEN liver_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS liver,
+    -- HIV/AIDS com lógica unificada: se tem na base HIV OU se apareceu em alguma consulta
+    CASE WHEN (
+      MAX(CASE WHEN SIDA_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1
+      OR hiv.cpf IS NOT NULL
+    ) THEN TRUE ELSE FALSE END AS SIDA,
+    CASE WHEN MAX(CASE WHEN tireoide_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS tireoide,
+    CASE WHEN MAX(CASE WHEN arritmia_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS arritmia,
+    CASE WHEN MAX(CASE WHEN coagulo_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS coagulo,
+    CASE WHEN MAX(CASE WHEN reumato_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS reumato,
+    CASE WHEN MAX(CASE WHEN valvular_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS valvular,
+    CASE WHEN MAX(CASE WHEN circ_pulm_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS circ_pulm,
+    CASE WHEN MAX(CASE WHEN neuro_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS neuro,
+    CASE WHEN MAX(CASE WHEN vascular_periferica_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS vascular_periferica,
+    CASE WHEN MAX(CASE WHEN plegia_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS plegia,
+    CASE WHEN MAX(CASE WHEN dislipidemia_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS dislipidemia,
+    CASE WHEN MAX(CASE WHEN obesidade_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS obesidade,
+    CASE WHEN MAX(CASE WHEN anemias_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS anemias,
+    CASE WHEN MAX(CASE WHEN alcool_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS alcool,
+    CASE WHEN MAX(CASE WHEN drogas_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS drogas,
+    CASE WHEN MAX(CASE WHEN tabaco_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS tabaco,
+    CASE WHEN MAX(CASE WHEN psicoses_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS psicoses,
+    CASE WHEN MAX(CASE WHEN depre_ansiedade_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS depre_ansiedade,
+    CASE WHEN MAX(CASE WHEN desnutricao_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS desnutricao,
+    CASE WHEN MAX(CASE WHEN retardo_mental_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS retardo_mental,
+    CASE WHEN MAX(CASE WHEN descapacidade_motora_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS descapacidade_motora,
+    CASE WHEN MAX(CASE WHEN olhos_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS olhos,
+    CASE WHEN MAX(CASE WHEN ouvidos_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS ouvidos,
+    CASE WHEN MAX(CASE WHEN ma_formacoes_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS ma_formacoes,
+    CASE WHEN MAX(CASE WHEN pele_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS pele,
+    CASE WHEN MAX(CASE WHEN painful_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS painful_condition,
+    CASE WHEN MAX(CASE WHEN asthma_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS asthma,
+    CASE WHEN MAX(CASE WHEN prostate_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS prostate_disorder,
+    CASE WHEN MAX(CASE WHEN epilepsy_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS epilepsy,
+    CASE WHEN MAX(CASE WHEN ibd_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS ibd, 
+    CASE WHEN MAX(CASE WHEN bronchiectasis_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS bronchiectasis,
+    CASE WHEN MAX(CASE WHEN leukemia_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS leukemia,
+    CASE WHEN MAX(CASE WHEN lymphoma_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS lymphoma,
+    CASE WHEN MAX(CASE WHEN metastasis_temp THEN 1 ELSE 0 END) OVER (PARTITION BY dp.cpf ORDER BY dp.entrada_data ROWS UNBOUNDED PRECEDING)=1 THEN TRUE ELSE FALSE END AS metastasis
+  
+  FROM dados_progressao dp
+  LEFT JOIN hiv_completo hiv ON dp.cpf = hiv.cpf
+  LEFT JOIN drc_egfr drc ON dp.cpf = drc.cpf
+
+),
+
+-- CTE 6: Cálculo de dias desde última consulta
+dados_com_dias AS (
+  SELECT
+    *,
+    MIN(IF(profissional_especialidade LIKE '%Médico%', entrada_data, NULL)) OVER (PARTITION BY cpf) AS primeira_data_medica,
+    MIN(IF(profissional_especialidade LIKE '%Enfermeiro%', entrada_data, NULL)) OVER (PARTITION BY cpf) AS primeira_data_enfermagem,
+    MAX(IF(profissional_especialidade LIKE '%Médico%', entrada_data, NULL)) OVER (PARTITION BY cpf ORDER BY entrada_data ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS data_medica_ant,
+    MAX(IF(profissional_especialidade LIKE '%Enfermeiro%', entrada_data, NULL)) OVER (PARTITION BY cpf ORDER BY entrada_data ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS data_enfermagem_ant
+  FROM dados_finais
+),
+
+dados_com_dias_calc AS (
+  SELECT
+    *,
+    CASE 
+      WHEN primeira_data_medica IS NULL THEN 9999
+      WHEN profissional_especialidade LIKE '%Médico%' THEN DATE_DIFF(CURRENT_DATE(), entrada_data, DAY)
+      WHEN data_medica_ant IS NOT NULL THEN DATE_DIFF(CURRENT_DATE(), data_medica_ant, DAY)
+      ELSE 9999
+    END AS dias_ultima_medica,
+    CASE 
+      WHEN primeira_data_enfermagem IS NULL THEN 9999
+      WHEN profissional_especialidade LIKE '%Enfermeiro%' THEN DATE_DIFF(CURRENT_DATE(), entrada_data, DAY)
+      WHEN data_enfermagem_ant IS NOT NULL THEN DATE_DIFF(CURRENT_DATE(), data_enfermagem_ant, DAY)
+      ELSE 9999
+    END AS dias_ultima_enfermagem
+  FROM dados_com_dias
+),
+
+-- CTE 7: Última observação por CPF
+ultima_observacao AS (
+  SELECT 
+    *,
+    ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY entrada_data DESC, id_hci DESC) AS rn_ultima
+  FROM dados_com_dias_calc
+),
+
+-- ============================================
+-- CTEs DE MEDICAMENTOS (da query mantidos_alterados.sql)
+-- ============================================
+
+base_episodios_med AS (
+    SELECT 
+        id_hci, 
+        paciente.cpf as paciente_cpf,
+        entrada_data
+    FROM `rj-sms.saude_historico_clinico.episodio_assistencial`
+    WHERE paciente.cpf IS NOT NULL
+),
+
+dados_unidos_med AS (
+    SELECT 
+        ep.paciente_cpf,
+        ep.entrada_data,
+        ep.id_hci,
+        JSON_EXTRACT_SCALAR(prescricao, '$.nome_medicamento') as medicamento_original,
+        JSON_EXTRACT_SCALAR(prescricao, '$.posologia') as posologia_original,
+        
+        CASE
+            WHEN REGEXP_CONTAINS(UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), '')), 
+                r'1.*COMP.*(MANH|DIA|JEJUM|24.*H)|UM.*COMP.*(MANH|DIA|JEJUM)|01.*COMP') 
+                THEN '1X/DIA'
+            WHEN REGEXP_CONTAINS(UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), '')), 
+                r'02.*COMP.*12.*12|2.*COMP.*12.*12|DOIS.*COMP.*12.*12') 
+                THEN '2X/DIA'
+            WHEN REGEXP_CONTAINS(UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), '')), 
+                r'1.*COMP.*12.*12|UM.*COMP.*12.*12|01.*COMP.*12.*12') 
+                THEN '2X/DIA'
+            WHEN REGEXP_CONTAINS(UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), '')), 
+                r'1.*COMP.*8.*8|UM.*COMP.*8.*8') 
+                THEN '3X/DIA'
+            WHEN REGEXP_CONTAINS(UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), '')), 
+                r'2.*COMP.*NOITE') 
+                THEN '2X/NOITE'
+            ELSE UPPER(COALESCE(JSON_EXTRACT_SCALAR(prescricao, '$.posologia'), 'SEM_POSOLOGIA'))
+        END as posologia_normalizada,
+        
+        CASE
+            WHEN JSON_EXTRACT_SCALAR(prescricao, '$.uso_continuado') = 'false' THEN 'AGUDO'
+            WHEN JSON_EXTRACT_SCALAR(prescricao, '$.uso_continuado') = 'true' THEN 'CRONICO'
+            ELSE 'CRONICO'
+        END as tipo_medicamento
+        
+    FROM `rj-sms.brutos_prontuario_vitacare.atendimento` AS atend,
+    UNNEST(JSON_EXTRACT_ARRAY(atend.prescricoes)) as prescricao
+    INNER JOIN base_episodios_med ep ON atend.id_hci = ep.id_hci
+    WHERE JSON_EXTRACT_SCALAR(prescricao, '$.nome_medicamento') IS NOT NULL
+),
+
+medicamentos_por_cpf AS (
+    SELECT 
+        paciente_cpf,
+        STRING_AGG(
+            CASE WHEN tipo_medicamento = 'CRONICO' 
+            THEN CONCAT(medicamento_original, ' - ', posologia_normalizada)
+            END, 
+            '; ' 
+            ORDER BY medicamento_original
+        ) as medicamentos_cronicos_normalizados,
+        COUNTIF(tipo_medicamento = 'CRONICO') as qtd_cronicos
+    FROM dados_unidos_med
+    WHERE paciente_cpf IN (SELECT DISTINCT cpf FROM ultima_observacao WHERE rn_ultima = 1)
+    GROUP BY paciente_cpf
+),
+
+ultima_prescricao_por_cpf AS (
+    SELECT 
+        paciente_cpf,
+        MAX(entrada_data) as data_ultima_prescricao
+    FROM dados_unidos_med
+    WHERE tipo_medicamento = 'CRONICO'
+    GROUP BY paciente_cpf
+),
+
+medicamentos_ultima_data AS (
+    SELECT 
+        med.paciente_cpf,
+        up.data_ultima_prescricao,
+        STRING_AGG(
+            CASE WHEN med.tipo_medicamento = 'CRONICO' 
+            THEN CONCAT(med.medicamento_original, ' - ', med.posologia_normalizada)
+            END, 
+            '; ' 
+            ORDER BY med.medicamento_original
+        ) as medicamentos_cronicos_normalizados,
+        COUNTIF(med.tipo_medicamento = 'CRONICO') as qtd_cronicos
+    FROM dados_unidos_med med
+    INNER JOIN ultima_prescricao_por_cpf up
+        ON med.paciente_cpf = up.paciente_cpf
+        AND med.entrada_data = up.data_ultima_prescricao
+    WHERE med.tipo_medicamento = 'CRONICO'
+    GROUP BY med.paciente_cpf, up.data_ultima_prescricao
+),
+
+-- CTE 8: Cálculo do número de morbidades
+N_morbidades_calc AS (
+  SELECT 
+    *,
+    (
+     CASE WHEN HAS THEN 1 ELSE 0 END +
+     CASE WHEN DM THEN 1 ELSE 0 END +
+     CASE WHEN CI THEN 1 ELSE 0 END +
+     CASE WHEN ICC THEN 1 ELSE 0 END +
+     CASE WHEN stroke THEN 1 ELSE 0 END +
+     CASE WHEN IRC THEN 1 ELSE 0 END +
+     CASE WHEN dementia THEN 1 ELSE 0 END +
+     CASE WHEN COPD THEN 1 ELSE 0 END +
+     CASE WHEN peptic THEN 1 ELSE 0 END +
+     CASE WHEN neoplasia_mama THEN 1 ELSE 0 END +
+     CASE WHEN neoplasia_colo_uterino THEN 1 ELSE 0 END +
+     CASE WHEN neoplasia_feminina_estrita THEN 1 ELSE 0 END +
+     CASE WHEN neoplasia_masculina_estrita THEN 1 ELSE 0 END +
+     CASE WHEN neoplasia_ambos_os_sexos THEN 1 ELSE 0 END +
+     CASE WHEN liver THEN 1 ELSE 0 END +
+     CASE WHEN SIDA THEN 1 ELSE 0 END +
+     CASE WHEN tireoide THEN 1 ELSE 0 END +
+     CASE WHEN arritmia THEN 1 ELSE 0 END +
+     CASE WHEN coagulo THEN 1 ELSE 0 END +
+     CASE WHEN reumato THEN 1 ELSE 0 END +
+     CASE WHEN valvular THEN 1 ELSE 0 END +
+     CASE WHEN circ_pulm THEN 1 ELSE 0 END +
+     CASE WHEN neuro THEN 1 ELSE 0 END +
+     CASE WHEN vascular_periferica THEN 1 ELSE 0 END +
+     CASE WHEN plegia THEN 1 ELSE 0 END +
+     CASE WHEN obesidade THEN 1 ELSE 0 END +
+     CASE WHEN anemias THEN 1 ELSE 0 END +
+     CASE WHEN alcool THEN 1 ELSE 0 END +
+     CASE WHEN drogas THEN 1 ELSE 0 END +
+     CASE WHEN psicoses THEN 1 ELSE 0 END +
+     CASE WHEN desnutricao THEN 1 ELSE 0 END +
+     CASE WHEN retardo_mental THEN 1 ELSE 0 END +
+     CASE WHEN olhos THEN 1 ELSE 0 END +
+     CASE WHEN ouvidos THEN 1 ELSE 0 END +
+     CASE WHEN painful_condition THEN 1 ELSE 0 END +
+     CASE WHEN asthma THEN 1 ELSE 0 END +
+     CASE WHEN prostate_disorder THEN 1 ELSE 0 END + 
+     CASE WHEN bronchiectasis THEN 1 ELSE 0 END
+    ) AS N_morbidades
+  FROM ultima_observacao
+  WHERE rn_ultima = 1
+)
+
+-- ============================================
+-- SELECT FINAL
+-- ============================================
+SELECT 
+  u.area_programatica AS cod_area,
+  u.clinica_familia,
+  u.ESF,
+  u.cpf,
+  u.id_paciente,
+  u.genero AS sexo,
+  u.idade,
+  CASE 
+    WHEN u.idade < 5 THEN '0-4'
+    WHEN u.idade BETWEEN 5 AND 9 THEN '5-9'
+    WHEN u.idade BETWEEN 10 AND 14 THEN '10-14'
+    WHEN u.idade BETWEEN 15 AND 19 THEN '15-19'
+    WHEN u.idade BETWEEN 20 AND 24 THEN '20-24'
+    WHEN u.idade BETWEEN 25 AND 29 THEN '25-29'
+    WHEN u.idade BETWEEN 30 AND 34 THEN '30-34'
+    WHEN u.idade BETWEEN 35 AND 39 THEN '35-39'
+    WHEN u.idade BETWEEN 40 AND 44 THEN '40-44'
+    WHEN u.idade BETWEEN 45 AND 49 THEN '45-49'
+    WHEN u.idade BETWEEN 50 AND 54 THEN '50-54'
+    WHEN u.idade BETWEEN 55 AND 59 THEN '55-59'
+    WHEN u.idade BETWEEN 60 AND 64 THEN '60-64'
+    WHEN u.idade BETWEEN 65 AND 69 THEN '65-69'
+    WHEN u.idade BETWEEN 70 AND 74 THEN '70-74'
+    WHEN u.idade BETWEEN 75 AND 79 THEN '75-79'
+    WHEN u.idade BETWEEN 80 AND 84 THEN '80-84'
+    WHEN u.idade BETWEEN 85 AND 89 THEN '85-89'
+    WHEN u.idade >= 90 THEN '90+'
+    ELSE NULL
+  END AS grupo_etario,
+  
+  -- Morbidades
+  u.HAS,
+  u.DM,
+  u.pre_DM,
+  u.CI,
+  u.ICC,
+  u.stroke,
+  u.IRC,
+  u.dementia,
+  u.COPD,
+  u.peptic,
+  u.neoplasia_mama,
+  u.neoplasia_colo_uterino,
+  u.neoplasia_feminina_estrita,
+  u.neoplasia_masculina_estrita,
+  u.neoplasia_ambos_os_sexos,
+  u.liver,
+  u.SIDA,
+  u.tireoide,
+  u.arritmia,
+  u.coagulo,
+  u.reumato,
+  u.circ_pulm,
+  u.neuro,
+  u.vascular_periferica,
+  u.plegia,
+  u.dislipidemia,
+  u.obesidade,
+  u.anemias,
+  u.alcool,
+  u.drogas,
+  u.tabaco,
+  u.psicoses,
+  u.depre_ansiedade,
+  u.desnutricao,
+  u.retardo_mental,
+  u.descapacidade_motora,
+  u.olhos,
+  u.ouvidos,
+  u.ma_formacoes,
+  u.pele,
+  u.painful_condition,
+  u.asthma,
+  u.prostate_disorder,
+  u.epilepsy,
+  u.ibd,
+  u.bronchiectasis,
+  u.leukemia,
+  u.lymphoma,
+  u.metastasis,
+  
+  u.N_morbidades,
+  
+  -- Lista de morbidades
+  (
+    SELECT STRING_AGG(x, ', ')
+    FROM UNNEST([
+      IF(u.HAS, 'Hipertensão Arterial', NULL),
+      IF(u.DM,  'Diabetes Mellitus', NULL),
+      IF(u.pre_DM, 'Pré-diabetes', NULL),
+      IF(u.CI, 'Cardiopatia Isquêmica', NULL),
+      IF(u.ICC, 'Insuficiência Cardíaca', NULL),
+      IF(u.stroke, 'AVC', NULL),
+      IF(u.IRC, 'Insuficiência Renal Crônica', NULL),
+      IF(u.dementia, 'Demência', NULL),
+      IF(u.COPD, 'DPOC', NULL),
+      IF(u.peptic, 'Úlcera Péptica', NULL),
+      IF(u.neoplasia_mama, 'Neoplasia de Mama', NULL),
+      IF(u.neoplasia_colo_uterino, 'Neoplasia de Colo do Útero', NULL),
+      IF(u.neoplasia_feminina_estrita, 'Neoplasia Feminina (exceto mama/colo)', NULL),
+      IF(u.neoplasia_masculina_estrita, 'Neoplasia Masculina', NULL),
+      IF(u.neoplasia_ambos_os_sexos, 'Neoplasia (ambos os sexos)', NULL),
+      IF(u.liver, 'Doença Hepática', NULL),
+      IF(u.SIDA, 'HIV/AIDS', NULL),
+      IF(u.tireoide, 'Doenças da Tireoide', NULL),
+      IF(u.arritmia, 'Arritmia', NULL),
+      IF(u.coagulo, 'Distúrbio de Coagulação', NULL),
+      IF(u.reumato, 'Doença Reumatológica', NULL),
+      IF(u.valvular, 'Doença Valvular', NULL),
+      IF(u.circ_pulm, 'Doença Circulatória Pulmonar', NULL),
+      IF(u.neuro, 'Doença Neurológica', NULL),
+      IF(u.vascular_periferica, 'Doença Vascular Periférica', NULL),
+      IF(u.plegia, 'Plegia', NULL),
+      IF(u.dislipidemia, 'Dislipidemia', NULL),
+      IF(u.obesidade, 'Obesidade', NULL),
+      IF(u.anemias, 'Anemia', NULL),
+      IF(u.alcool, 'Transtorno por Uso de Álcool', NULL),
+      IF(u.drogas, 'Transtorno por Uso de Drogas', NULL),
+      IF(u.tabaco, 'Tabagismo', NULL),
+      IF(u.psicoses, 'Psicose', NULL),
+      IF(u.depre_ansiedade, 'Depressão e Ansiedade', NULL),
+      IF(u.desnutricao, 'Desnutrição', NULL),
+      IF(u.retardo_mental, 'Deficiência Intelectual', NULL),
+      IF(u.descapacidade_motora, 'Deficiência Motora', NULL),
+      IF(u.olhos, 'Doença Ocular', NULL),
+      IF(u.ouvidos, 'Perda de audição', NULL),
+      IF(u.ma_formacoes, 'Malformação Congênita', NULL),
+      IF(u.pele, 'Doença de Pele', NULL),
+      IF(u.painful_condition, 'Condição Dolorosa Crônica', NULL),
+      IF(u.asthma, 'Asma', NULL),
+      IF(u.prostate_disorder, 'Doença da Próstata', NULL),
+      IF(u.epilepsy, 'Epilepsia', NULL),
+      IF(u.ibd, 'Doença Inflamatória Intestinal', NULL),
+      IF(u.bronchiectasis, 'Bronquiectasia', NULL),
+      IF(u.leukemia, 'Leucemia', NULL),
+      IF(u.lymphoma, 'Linfoma', NULL),
+      IF(u.metastasis, 'Câncer Metastático', NULL)
+    ]) AS x
+    WHERE x IS NOT NULL
+  ) AS lista_morbidades,
+  
+  -- Medicamentos crônicos
+  med.medicamentos_cronicos_normalizados,
+  med.qtd_cronicos AS qtd_medicamentos_cronicos,
+  
+  -- Polifarmácia
+  CASE WHEN COALESCE(med.qtd_cronicos, 0) >= 5 THEN TRUE ELSE FALSE END AS polifarmacia,
+  CASE WHEN COALESCE(med.qtd_cronicos, 0) >= 10 THEN TRUE ELSE FALSE END AS hiperpolifarmacia,
+  
+  -- Dias desde últimas consultas
+  u.dias_ultima_medica,
+  u.dias_ultima_enfermagem,
+  
+  CURRENT_DATE() AS data_extracao
+
+FROM N_morbidades_calc u
+LEFT JOIN medicamentos_ultima_data med ON u.cpf = med.paciente_cpf
+ORDER BY u.area_programatica, u.clinica_familia, u.ESF, u.cpf
+
+
+```

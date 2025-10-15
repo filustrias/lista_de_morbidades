@@ -1,0 +1,165 @@
+# Morbidades agregadas
+
+Abaixo está a query com as informações agregadas seguindo a seguinte estrutura hierárquica:
+
+Área Programática
+
+Clínica da Família
+
+ESF
+
+sexo
+
+Grupo etário (5 anos)
+
+Esta tabela apresenta valores absolutos e prevalências para população geral, cada morbidade, multimorbidade, polifarmácia e hiperpolifarmácia. Também apresenta algumas informações sumárias como média de morbidades e média de medicamentos prescritos.
+
+
+A tabela Morbidades agregadas está aqui - rj-sms-sandbox.sub_pav_us.morbidades_agregadas 
+
+
+
+```{r}
+
+#| eval: false   # não executa
+#| echo: true    # exibe o código
+#| include: true # garante que o chunk aparece no documento
+
+
+-- ============================================
+-- AGREGAÇÃO DE MORBIDADES POR ESTRUTURA HIERÁRQUICA
+-- Área Programática > Clínica > ESF > Sexo > Grupo Etário
+-- ============================================
+
+
+
+SELECT 
+  cod_area,
+  clinica_familia,
+  ESF,
+  sexo,
+  grupo_etario,
+  
+  -- Total de pacientes
+  COUNT(DISTINCT cpf) AS total_pacientes,
+  
+  -- Morbidades principais
+  COUNTIF(HAS = TRUE) AS n_hipertensao,
+  COUNTIF(DM = TRUE) AS n_diabetes,
+  COUNTIF(pre_DM = TRUE) AS n_pre_diabetes,
+  COUNTIF(CI = TRUE) AS n_cardiopatia_isquemica,
+  COUNTIF(ICC = TRUE) AS n_insuficiencia_cardiaca,
+  COUNTIF(stroke = TRUE) AS n_avc,
+  COUNTIF(IRC = TRUE) AS n_doenca_renal_cronica,
+  COUNTIF(dementia = TRUE) AS n_demencia,
+  COUNTIF(COPD = TRUE) AS n_dpoc,
+  COUNTIF(peptic = TRUE) AS n_ulcera_peptica,
+  
+  -- Neoplasias
+  COUNTIF(neoplasia_mama = TRUE) AS n_neoplasia_mama,
+  COUNTIF(neoplasia_colo_uterino = TRUE) AS n_neoplasia_colo_uterino,
+  COUNTIF(neoplasia_feminina_estrita = TRUE) AS n_neoplasia_feminina_estrita,
+  COUNTIF(neoplasia_masculina_estrita = TRUE) AS n_neoplasia_masculina_estrita,
+  COUNTIF(neoplasia_ambos_os_sexos = TRUE) AS n_neoplasia_ambos_sexos,
+  COUNTIF(leukemia = TRUE) AS n_leucemia,
+  COUNTIF(lymphoma = TRUE) AS n_linfoma,
+  COUNTIF(metastasis = TRUE) AS n_cancer_metastatico,
+  
+  -- Outras morbidades crônicas
+  COUNTIF(liver = TRUE) AS n_doenca_hepatica,
+  COUNTIF(SIDA = TRUE) AS n_hiv_aids,
+  COUNTIF(arritmia = TRUE) AS n_arritmia,
+  COUNTIF(coagulo = TRUE) AS n_disturbio_coagulacao,
+  COUNTIF(reumato = TRUE) AS n_doenca_reumatologica,
+  COUNTIF(circ_pulm = TRUE) AS n_doenca_circulatoria_pulmonar,
+  COUNTIF(neuro = TRUE) AS n_doenca_neurologica,
+  COUNTIF(vascular_periferica = TRUE) AS n_doenca_vascular_periferica,
+  COUNTIF(plegia = TRUE) AS n_plegia,
+  COUNTIF(dislipidemia = TRUE) AS n_dislipidemia,
+  COUNTIF(obesidade = TRUE) AS n_obesidade,
+  COUNTIF(anemias = TRUE) AS n_anemias,
+  
+  -- Saúde mental e uso de substâncias
+  COUNTIF(alcool = TRUE) AS n_transtorno_alcool,
+  COUNTIF(drogas = TRUE) AS n_transtorno_drogas,
+  COUNTIF(tabaco = TRUE) AS n_tabagismo,
+  COUNTIF(psicoses = TRUE) AS n_psicoses,
+  COUNTIF(depre_ansiedade = TRUE) AS n_depressao_ansiedade,
+  
+  -- Outras condições
+  COUNTIF(desnutricao = TRUE) AS n_desnutricao,
+  COUNTIF(retardo_mental = TRUE) AS n_deficiencia_intelectual,
+  COUNTIF(descapacidade_motora = TRUE) AS n_deficiencia_motora,
+  COUNTIF(olhos = TRUE) AS n_doenca_ocular,
+  COUNTIF(ouvidos = TRUE) AS n_perda_audicao,
+  COUNTIF(ma_formacoes = TRUE) AS n_malformacao_congenita,
+  COUNTIF(pele = TRUE) AS n_doenca_pele,
+  
+  -- Condições adicionais (SNOMED)
+  COUNTIF(painful_condition = TRUE) AS n_condicao_dolorosa_cronica,
+  COUNTIF(asthma = TRUE) AS n_asma,
+  COUNTIF(prostate_disorder = TRUE) AS n_doenca_prostata,
+  COUNTIF(epilepsy = TRUE) AS n_epilepsia,
+  COUNTIF(ibd = TRUE) AS n_doenca_inflamatoria_intestinal,
+  COUNTIF(bronchiectasis = TRUE) AS n_bronquiectasia,
+  
+  -- Indicadores de multimorbidade
+  COUNTIF(N_morbidades = 0) AS n_sem_morbidades,
+  COUNTIF(N_morbidades = 1) AS n_1_morbidade,
+  COUNTIF(N_morbidades = 2) AS n_2_morbidades,
+  COUNTIF(N_morbidades = 3) AS n_3_morbidades,
+  COUNTIF(N_morbidades = 4) AS n_4_morbidades,
+  COUNTIF(N_morbidades = 5) AS n_5_morbidades,
+  COUNTIF(N_morbidades >= 6) AS n_6_ou_mais_morbidades,
+  COUNTIF(N_morbidades >= 2) AS n_multimorbidade,
+  
+  -- Estatísticas de morbidades
+  ROUND(AVG(N_morbidades), 2) AS media_morbidades,
+  APPROX_QUANTILES(N_morbidades, 100)[OFFSET(50)] AS mediana_morbidades,
+  MIN(N_morbidades) AS min_morbidades,
+  MAX(N_morbidades) AS max_morbidades,
+  
+  -- Polifarmácia
+  COUNTIF(polifarmacia = TRUE) AS n_polifarmacia,
+  COUNTIF(hiperpolifarmacia = TRUE) AS n_hiperpolifarmacia,
+  COUNTIF(qtd_medicamentos_cronicos = 0) AS n_sem_medicamentos,
+  COUNTIF(qtd_medicamentos_cronicos BETWEEN 1 AND 4) AS n_1_a_4_medicamentos,
+  COUNTIF(qtd_medicamentos_cronicos BETWEEN 5 AND 9) AS n_5_a_9_medicamentos,
+  COUNTIF(qtd_medicamentos_cronicos >= 10) AS n_10_ou_mais_medicamentos,
+  
+  -- Estatísticas de medicamentos
+  ROUND(AVG(COALESCE(qtd_medicamentos_cronicos, 0)), 2) AS media_medicamentos,
+  APPROX_QUANTILES(COALESCE(qtd_medicamentos_cronicos, 0), 100)[OFFSET(50)] AS mediana_medicamentos,
+  MAX(qtd_medicamentos_cronicos) AS max_medicamentos,
+  
+  -- Prevalências (%)
+  ROUND(COUNTIF(HAS = TRUE) * 100.0 / COUNT(DISTINCT cpf), 2) AS prevalencia_hipertensao,
+  ROUND(COUNTIF(DM = TRUE) * 100.0 / COUNT(DISTINCT cpf), 2) AS prevalencia_diabetes,
+  ROUND(COUNTIF(N_morbidades >= 2) * 100.0 / COUNT(DISTINCT cpf), 2) AS prevalencia_multimorbidade,
+  ROUND(COUNTIF(polifarmacia = TRUE) * 100.0 / COUNT(DISTINCT cpf), 2) AS prevalencia_polifarmacia,
+  ROUND(COUNTIF(hiperpolifarmacia = TRUE) * 100.0 / COUNT(DISTINCT cpf), 2) AS prevalencia_hiperpolifarmacia,
+  
+  -- Acompanhamento
+  ROUND(AVG(dias_ultima_medica), 1) AS media_dias_ultima_consulta_medica,
+  ROUND(AVG(dias_ultima_enfermagem), 1) AS media_dias_ultima_consulta_enfermagem,
+  COUNTIF(dias_ultima_medica <= 180) AS n_consulta_medica_6_meses,
+  COUNTIF(dias_ultima_medica <= 365) AS n_consulta_medica_12_meses,
+  COUNTIF(dias_ultima_enfermagem <= 180) AS n_consulta_enfermagem_6_meses,
+  COUNTIF(dias_ultima_enfermagem <= 365) AS n_consulta_enfermagem_12_meses
+
+FROM `rj-sms-sandbox.sub_pav_us.morbidades_20251015`
+
+GROUP BY 
+  cod_area,
+  clinica_familia,
+  ESF,
+  sexo,
+  grupo_etario
+
+ORDER BY 
+  cod_area,
+  clinica_familia,
+  ESF,
+  sexo,
+  grupo_etario;
+```

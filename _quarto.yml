@@ -1,0 +1,33 @@
+project:
+  type: book
+  output-dir: docs
+
+book:
+  title: "Lista de Morbidades"
+  author: "Adelson Guaaraci Jantsch"
+  date: "2025-10-15"
+  chapters:
+    - index.qmd
+    - intro.qmd
+    - summary.qmd
+    - references.qmd
+
+bibliography: references.bib
+
+execute:
+  eval: false      # não executa nenhum chunk
+  echo: true
+  warning: false
+  message: false
+
+format:
+  html:
+    theme:
+      - cosmo
+      - brand
+  pdf:
+    documentclass: scrreprt
+
+editor: visual
+
+
