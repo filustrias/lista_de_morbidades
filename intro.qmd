@@ -1,4 +1,4 @@
-# Tabela Fato pacientes - Morbidades e fármacos de uso crônico para cada paciente
+# Tabela Fato pacientes - Morbidades e fármacos de uso crônico para cada paciente  {.unnumbered}
 
 Aqui está a query para a categorização de cada paciente, de acordo com área programática, clínica da família e ESF para cada morbidade listada.
 

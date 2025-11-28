@@ -1,4 +1,4 @@
-# Morbidades agregadas
+# Morbidades agregadas  {.unnumbered}
 
 Abaixo está a query com as informações agregadas seguindo a seguinte estrutura hierárquica:
 

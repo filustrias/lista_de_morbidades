@@ -4,14 +4,14 @@ project:
 
 book:
   title: "Lista de Morbidades"
-  author: "Adelson Guaaraci Jantsch"
+  author: "Adelson Guaraci Jantsch"
   date: "2025-11-27"
   chapters:
     - index.qmd
+    - docu_enxuto.qmd
     - intro.qmd
     - summary.qmd
     - references.qmd
-    - docu_enxuto.qmd
 
 bibliography: references.bib
 
