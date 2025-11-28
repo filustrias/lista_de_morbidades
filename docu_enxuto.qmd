@@ -1,0 +1,1603 @@
+# Documentação Técnica: MM_exames_e_risco_A1C
+
+## Visão Geral
+
+### Objetivo
+A tabela `rj-sms-sandbox.sub_pav_us.MM_exames_e_risco_A1C` é a **tabela fato principal** do Navegador Clínico de Multimorbidade. Consolida dados de múltiplas fontes em **uma linha por paciente (CPF)**, integrando:
+
+- Dados demográficos e de cadastro na ESF
+- 56 morbidades identificadas por CID
+- Diagnósticos expandidos de HAS e DM (CID + medidas + medicamentos)
+- Exames laboratoriais e medidas antropométricas
+- Cálculos de risco cardiovascular (Framingham + estratificação SBC)
+- Índice de Charlson modificado
+- Histórico de controle de condições crônicas
+- Mais de 30 lacunas de cuidado identificadas
+
+### Localização
+```
+Projeto: rj-sms-sandbox
+Dataset: sub_pav_us
+Tabela: MM_exames_e_risco_A1C
+```
+
+### Granularidade
+**1 linha por CPF** - cada paciente aparece uma única vez na tabela final.
+
+### Critérios de Inclusão
+- CPF válido (não nulo)
+- Sem indicador de óbito (`obito_indicador = FALSE`)
+- Sem data de óbito (`obito_data IS NULL`)
+- Cadastrado em ESF (não ESB - Equipe de Saúde Bucal)
+- INE de cadastro não nulo
+
+---
+
+## Arquitetura de Dados
+
+### Fluxo Geral das CTEs
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           FONTES DE DADOS                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ • brutos_prontuario_vitacare_historico.hiv                                  │
+│ • brutos_prontuario_vitacare_historico.acto                                 │
+│ • saude_historico_clinico.episodio_assistencial                             │
+│ • saude_historico_clinico.exame                                             │
+│ • saude_historico_clinico.paciente                                          │
+│ • brutos_cientificalab.solicitacoes/exames/resultados                       │
+│ • brutos_prontuario_vitacare.atendimento                                    │
+│ • sub_pav_us.indicadores_vitacare_fix (tabela auxiliar com correções)       │
+│ • sub_pav_us.PA_A1C_glic_cpf_fix (tabela auxiliar com correções)            │
+│ • sub_pav_us.MM_mantidos_alterados_ultimas (medicamentos crônicos)          │
+│ • saude_dados_mestres.estabelecimento                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SEÇÃO 1: HIV/AIDS                                     │
+│  hiv_cpf_raw → hiv_cpf → exames_hiv_cpf_raw → exames_hiv_cpf_last           │
+│                       → hiv_completo                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   SEÇÃO 2: EXAMES LABORATORIAIS                              │
+│  exames_historico ─┐                                                         │
+│  exames_cientifica ┼→ todos_exames → exames_filtrados → exames_mais_recentes │
+│                    │                                  → exames_pivot          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   SEÇÃO 3: DADOS DEMOGRÁFICOS                                │
+│                        dados_paciente                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                SEÇÃO 4: MEDIDAS ANTROPOMÉTRICAS                              │
+│                 ultimas_medidas_antropometricas                              │
+│            (fontes: indicadores_vitacare_fix + episodio)                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   SEÇÃO 5: MORBIDADES POR CID                                │
+│              morbidades_base → morbidades_por_cid                            │
+│                    (56 condições clínicas)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 5B: CRITÉRIOS EXPANDIDOS HAS                              │
+│  todas_medidas_pa → criterios_has_medidas                                    │
+│                   → criterios_has_medicamentos                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 5C: CRITÉRIOS EXPANDIDOS DM                               │
+│  todas_medidas_glicemia → criterios_dm_medidas                               │
+│                         → criterios_dm_medicamentos                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 5D: CONSOLIDAÇÃO HAS + DM                                 │
+│                      has_dm_consolidado                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 5E: PROGRESSÃO GLICÊMICA                                  │
+│  hba1c_progressao → progressao_glicemica                                     │
+│  historico_controle_glicemia → resumo_controle_glicemia                      │
+│  ultimas_medidas_glicemia                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 5F: PROGRESSÃO PRESSÓRICA                                 │
+│  todas_medidas_pa_completas → pa_progressao → progressao_pressao             │
+│  historico_controle_pa → resumo_controle_pa                                  │
+│  ultimas_medidas_pa                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   SEÇÃO 6: CONSULTAS                                         │
+│  contagem_consultas_detalhada → intervalos_consultas → contagem_consultas    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              SEÇÃO 7: CONSOLIDAÇÃO COM eGFR                                  │
+│  dados_consolidados (JOIN de todas as CTEs anteriores)                       │
+│  + Cálculo CKD-EPI 2021 + Estadiamento CKD                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           SEÇÃO 7A: MORBIDADES CONSOLIDADAS                                  │
+│  dados_com_irc → dados_com_hiv → dados_com_dislipidemia                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           SEÇÃO 7B: MULTIMORBIDADE                                           │
+│  morbidades_array → dados_com_multimorbidade                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           SEÇÃO 9: FRAMINGHAM                                                │
+│  pontuacao_framingham → risco_calculado                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           SEÇÃO 10: RISCO CARDIOVASCULAR SBC                                 │
+│               risco_cardiovascular_estratificado                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           SEÇÃO 11: CHARLSON INDEX                                           │
+│  charlson_componentes → charlson_final                                       │
+│  (inclui JOIN com MM_mantidos_alterados_ultimas para polifarmácia)           │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│           BENCHMARK DE CONSULTAS                                             │
+│               benchmark_consultas                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      SELECT FINAL                                            │
+│  • Todos os campos consolidados                                              │
+│  • Lacunas de cuidado calculadas                                             │
+│  • Flags de inequidade                                                       │
+│  • Ordenação por risco cardiovascular                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Seção 1: Identificação de HIV/AIDS
+
+### Objetivo Clínico
+Identificar pacientes com HIV/AIDS utilizando **duas fontes complementares**:
+1. Base específica de HIV do Vitacare (registro histórico)
+2. Exames de CD4 e carga viral do episódio assistencial
+
+### CTEs Envolvidas
+
+#### `hiv_cpf_raw`
+**Fonte**: `brutos_prontuario_vitacare_historico.hiv` + `brutos_prontuario_vitacare_historico.acto`
+
+**Objetivo**: Extrair CPFs de pacientes com registro na base de HIV do Vitacare.
+
+**Campos capturados**:
+- `id_prontuario_global`: Identificador do prontuário
+- `id_cnes`: Unidade de saúde
+- `ano_diagnostico`: Ano do diagnóstico de AIDS (campo `aids_doenca_atual_ano_1_teste`)
+- `cpf`: CPF limpo (apenas dígitos, via REGEXP_REPLACE)
+
+**Regra de negócio**: Remove caracteres não numéricos do CPF.
+
+#### `hiv_cpf`
+**Objetivo**: Deduplica a CTE anterior, mantendo apenas CPFs com 11 dígitos.
+
+**Regra de deduplicação**: `ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY id_prontuario_global DESC)` - mantém o registro mais recente por prontuário.
+
+#### `exames_hiv_cpf_raw`
+**Fonte**: `saude_historico_clinico.episodio_assistencial` (campo `exames_realizados`)
+
+**Objetivo**: Identificar pacientes com exames de CD4 ou carga viral, indicativos de HIV.
+
+**Padrão REGEX utilizado**:
+```sql
+REGEXP_CONTAINS(er.descricao, r'(?i)\b(cd4|cv|carga viral)\b')
+```
+
+**Campos capturados**:
+- `id_hci`: ID do episódio
+- `entrada_data`: Data do exame
+- `tipo`, `descricao`: Detalhes do exame
+- `cpf`: CPF limpo
+
+#### `exames_hiv_cpf_last`
+**Objetivo**: Mantém apenas o exame mais recente por CPF.
+
+**Regra de deduplicação**: `ORDER BY entrada_data DESC, id_hci DESC`
+
+#### `hiv_completo`
+**Objetivo**: Consolida as duas fontes de HIV em uma única CTE.
+
+**Campos produzidos**:
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `cpf` | STRING | CPF do paciente |
+| `id_prontuario_global` | STRING | ID do prontuário Vitacare |
+| `id_cnes` | STRING | Unidade onde foi registrado |
+| `ano_diagnostico` | STRING | Ano do diagnóstico de AIDS |
+| `data_ultimo_exame_hiv` | DATE | Data do último CD4/CV |
+| `data_diagnostico_hiv` | DATE | Ano convertido para DATE (01/01/ano) |
+
+**Validação do ano de diagnóstico**:
+```sql
+SAFE_CAST(ano_diagnostico AS INT64) >= 1980  -- HIV surgiu nos anos 80
+SAFE_CAST(ano_diagnostico AS INT64) <= EXTRACT(YEAR FROM CURRENT_DATE())
+```
+
+### Uso no Dashboard
+- Identificação de pacientes com HIV para acompanhamento diferenciado
+- Cálculo de multimorbidade (HIV conta como uma morbidade)
+- Lacunas de cuidado específicas para PVHIV
+
+---
+
+## Seção 2: Exames Laboratoriais
+
+### Objetivo Clínico
+Consolidar resultados de exames laboratoriais de **múltiplas fontes**, mantendo apenas o resultado mais recente de cada tipo de exame por paciente.
+
+### Exames Capturados
+
+| Código | Exame | Faixa Válida | Unidade |
+|--------|-------|--------------|---------|
+| CRE | Creatinina | 0.2 - 15 | mg/dL |
+| COL | Colesterol Total | 50 - 600 | mg/dL |
+| HDL | HDL-Colesterol | 10 - 150 | mg/dL |
+| LDL | LDL-Colesterol | 20 - 400 | mg/dL |
+| TRI | Triglicerídeos | 20 - 1000 | mg/dL |
+| GLI/GLU | Glicemia | 30 - 500 | mg/dL |
+| HGL | Hemoglobina Glicada | 3 - 20 | % |
+
+### CTEs Envolvidas
+
+#### `exames_historico`
+**Fonte**: `saude_historico_clinico.exame` (UNNEST do array `exames`)
+
+**Objetivo**: Extrair exames da base histórica consolidada.
+
+**Campos capturados**:
+- `paciente_cpf`
+- `cod_exame`: Código do exame (CRE, COL, etc.)
+- `unidade`
+- `resultado_num`: Resultado convertido para FLOAT64
+- `data_exame`: Data parseada do formato `%d/%m/%Y %H:%M:%S`
+
+**Filtros aplicados**:
+- Resultado não nulo
+- Código do exame na lista definida
+- CPF não nulo
+- Resultado > 0 e < 10000 (sanidade)
+
+#### `exames_cientifica`
+**Fonte**: `brutos_cientificalab.solicitacoes` + `brutos_cientificalab.exames` + `brutos_cientificalab.resultados`
+
+**Objetivo**: Extrair exames do laboratório Científica (rede municipal).
+
+**Estrutura de JOINs**:
+```
+solicitacoes (paciente_cpf) 
+    → exames (cod_apoio, data_assinatura) 
+    → resultados (resultado)
+```
+
+**Mesmos filtros de validação da CTE anterior**.
+
+#### `todos_exames`
+**Objetivo**: UNION ALL das fontes de exames.
+
+#### `exames_filtrados`
+**Objetivo**: Aplica filtros de faixa válida específicos por tipo de exame.
+
+**Regras de filtragem**:
+```sql
+(cod_exame = 'COL' AND resultado_num BETWEEN 50 AND 600)
+OR (cod_exame = 'HDL' AND resultado_num BETWEEN 10 AND 150)
+OR (cod_exame = 'LDL' AND resultado_num BETWEEN 20 AND 400)
+OR (cod_exame = 'TRI' AND resultado_num BETWEEN 20 AND 1000)
+OR (cod_exame = 'GLI' AND resultado_num BETWEEN 30 AND 500)
+OR (cod_exame = 'GLU' AND resultado_num BETWEEN 30 AND 500)
+OR (cod_exame = 'HGL' AND resultado_num BETWEEN 3 AND 20 AND unidade = '%')
+OR (cod_exame = 'CRE' AND resultado_num BETWEEN 0.2 AND 15 AND unidade = 'mg/dL')
+```
+
+#### `exames_mais_recentes`
+**Objetivo**: Mantém apenas o exame mais recente de cada tipo por CPF.
+
+**Regra**: `ROW_NUMBER() OVER (PARTITION BY paciente_cpf, cod_exame ORDER BY data_exame DESC) = 1`
+
+#### `exames_pivot`
+**Objetivo**: Transpõe os exames de linhas para colunas, criando uma estrutura de 1 linha por paciente.
+
+**Campos produzidos**:
+| Campo | Descrição |
+|-------|-----------|
+| `cpf` | CPF do paciente |
+| `creatinina` | Último valor de creatinina |
+| `colesterol_total` | Último valor de colesterol total |
+| `hdl` | Último valor de HDL |
+| `ldl` | Último valor de LDL |
+| `triglicerides` | Último valor de triglicerídeos |
+| `glicemia` | Último valor de glicemia (GLI ou GLU, com COALESCE) |
+| `hba1c` | Último valor de HbA1c |
+| `data_creatinina` | Data do exame de creatinina |
+| `data_colesterol` | Data do exame de colesterol |
+| `data_hdl` | Data do exame de HDL |
+| `data_ldl` | Data do exame de LDL |
+| `data_glicemia` | Data do exame de glicemia |
+| `data_hba1c` | Data do exame de HbA1c |
+| `dias_desde_ultimo_exame` | Dias desde o exame mais recente (entre CRE, COL, HDL, LDL) |
+| `dias_desde_ultima_glicemia` | Dias desde última glicemia |
+
+### Uso no Dashboard
+- Cálculo de eGFR (requer creatinina)
+- Estratificação de risco cardiovascular (requer perfil lipídico)
+- Classificação de dislipidemia (ATP III)
+- Controle glicêmico em diabéticos
+- Identificação de lacunas de exames laboratoriais
+
+---
+
+## Seção 3: Dados Demográficos e de Cadastro
+
+### Objetivo Clínico
+Estabelecer a **base de pacientes** com seus dados demográficos e vínculo com a ESF (Equipe de Saúde da Família).
+
+### CTE: `dados_paciente`
+
+**Fonte**: `saude_historico_clinico.paciente` + `saude_dados_mestres.estabelecimento`
+
+**Campos produzidos**:
+
+#### Dados Pessoais
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `cpf` | STRING | CPF do paciente |
+| `nome` | STRING | Nome completo |
+| `genero` | STRING | "masculino" ou "feminino" |
+| `data_nascimento` | DATE | Data de nascimento |
+| `idade` | INT64 | Idade calculada em anos |
+| `raca` | STRING | Raça/cor autodeclarada |
+
+#### Dados de Cadastro na ESF
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `id_ine_cadastro` | STRING | INE da equipe de cadastro |
+| `nome_esf_cadastro` | STRING | Nome da ESF (sem numeração romana) |
+| `id_cnes_cadastro` | STRING | CNES da unidade de cadastro |
+| `nome_clinica_cadastro` | STRING | Nome da unidade (corrigido) |
+| `nome_medico_esf_cadastro` | STRING | Médico da equipe |
+| `nome_enfermeiro_esf_cadastro` | STRING | Enfermeiro da equipe |
+| `area_programatica_cadastro` | STRING | AP do estabelecimento |
+
+**Transformações aplicadas**:
+
+1. **Remoção de numeração romana do nome da ESF**:
+```sql
+REGEXP_REPLACE(
+    p.equipe_saude_familia[SAFE_OFFSET(0)].nome,
+    r'\s+(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|XIII|XIV|XV|XVI|XVII|XVIII|XIX|XX)\s*$', 
+    ''
+)
+```
+
+2. **Correção de nome de unidade específica**:
+```sql
+REPLACE(
+    p.equipe_saude_familia[SAFE_OFFSET(0)].clinica_familia.nome,
+    'Policlinica Newton Bethlem', 
+    'CMS Newton Bethlem'
+)
+```
+
+**Filtros de exclusão**:
+- CPF nulo
+- Óbito registrado (`obito_indicador = TRUE` ou `obito_data IS NOT NULL`)
+- ESB (Equipe de Saúde Bucal): `NOT REGEXP_CONTAINS(UPPER(...), r'ESB')`
+- INE nulo
+
+**Nota importante**: O array `equipe_saude_familia` é acessado com `SAFE_OFFSET(0)` porque contém apenas um elemento por paciente (descoberta durante desenvolvimento).
+
+### Uso no Dashboard
+- Filtros hierárquicos (AP → Unidade → ESF)
+- Identificação de profissionais responsáveis
+- Cálculos que dependem de idade e gênero (eGFR, Framingham)
+- Estratificação populacional
+
+---
+
+## Seção 4: Medidas Antropométricas
+
+### Objetivo Clínico
+Obter as medidas mais recentes de peso, altura e IMC para cálculo de obesidade e avaliação nutricional.
+
+### CTE: `ultimas_medidas_antropometricas`
+
+**Fontes**:
+1. `sub_pav_us.indicadores_vitacare_fix` - Dados corrigidos do Vitacare
+2. `saude_historico_clinico.episodio_assistencial` - Episódios assistenciais
+
+**Campos produzidos**:
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `cpf` | STRING | CPF do paciente |
+| `peso` | FLOAT64 | Peso em kg |
+| `altura` | FLOAT64 | Altura em metros |
+| `IMC` | FLOAT64 | Índice de Massa Corporal calculado |
+| `obesidade_por_IMC` | BOOL | TRUE se IMC ≥ 30 |
+| `data_peso` | DATE | Data da medição do peso |
+| `data_altura` | DATE | Data da medição da altura |
+| `fonte` | STRING | "vitacare" ou "episodio_assistencial" |
+
+**Lógica de consolidação**:
+1. UNION ALL das duas fontes
+2. Deduplicação mantendo o registro mais recente: `ORDER BY COALESCE(data_peso, data_altura) DESC`
+3. Uma única linha por CPF (`rn_final = 1`)
+
+**Cálculo do IMC**:
+```sql
+ROUND(peso / POWER(altura, 2), 1)
+```
+
+**Critério de obesidade**:
+```sql
+IMC >= 30
+```
+
+### Uso no Dashboard
+- Classificação nutricional
+- Identificação de obesidade (morbidade)
+- Lacuna de IMC não calculável (falta peso ou altura)
+
+---
+
+## Seção 5: Morbidades por CID
+
+### Objetivo Clínico
+Identificar **56 condições clínicas** através de códigos CID registrados nos episódios assistenciais. Para cada condição, captura-se a **primeira data de diagnóstico**.
+
+### CTEs Envolvidas
+
+#### `morbidades_base`
+**Fonte**: `saude_historico_clinico.episodio_assistencial` (UNNEST de `condicoes`)
+
+**Objetivo**: Extrair todos os pares CPF + CID + Data de entrada.
+
+**Campos**:
+- `cpf`: CPF limpo (11 dígitos)
+- `entrada_data`: Data do registro
+- `cid`: Código CID
+
+#### `morbidades_por_cid`
+**Objetivo**: Agrupa por CPF e identifica a **primeira data** (MIN) de cada condição.
+
+**Deduplicação**: `QUALIFY ROW_NUMBER() OVER (PARTITION BY cpf ORDER BY cpf) = 1`
+
+### Catálogo de Morbidades
+
+#### Seção 1: Morbidades Principais
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `HAS` | Hipertensão Arterial | `^(I1[0-6]\|O1[01])` |
+| `DM` | Diabetes Mellitus | `^(E1[0-4]\|O24\|H360\|H280\|G632\|G590\|G990\|N083\|M142)` |
+
+**Nota**: HAS e DM são posteriormente expandidos com critérios de medidas e medicamentos.
+
+#### Seção 2: Cardiovasculares
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `CI` | Cardiopatia Isquêmica | `^(I2[0-5]\|Z95[15])` |
+| `ICC` | Insuficiência Cardíaca | `^(I110\|I13[02]\|I42[0-9]\|I43\|I50\|I517\|P290)` |
+| `stroke` | AVC/Stroke | `^(I6\|G4[56]\|H340)` |
+| `arritmia` | Arritmias (incl. FA) | `^(I44[1-3]\|I45[69]\|I4[7-9]\|R00[018]\|T821\|Z45[05]\|Z950)` |
+| `valvular` | Doença Valvar | `^(A520\|I0[5-9]\|I34\|I3[5-9]\|Q23[0-3]\|Z95[2-4])` |
+| `circ_pulm` | Circulação Pulmonar | `^(I2[6-8])` |
+| `vascular_periferica` | Doença Vascular Periférica | `^(I7[01]\|I73[189]\|I77[12]\|I79[02]\|K55[189]\|Z95[89])` |
+
+#### Seção 3: Neurológicas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `epilepsy` | Epilepsia | `^(G4[01])` |
+| `parkinsonism` | Parkinsonismo | `^(G2[0-2])` |
+| `multiple_sclerosis` | Esclerose Múltipla | `^G35` |
+| `neuro` | Outras Neurológicas | `^(G1[0-3]\|G25[45]\|G31[012]\|G3[2367]\|G93[14]\|R470\|R56)` |
+| `dementia` | Demência | `^(F0[0-35]\|G30)` |
+| `plegia` | Plegia/Paralisia | `^(G041\|G114\|G80[12]\|G8[1-3])` |
+
+#### Seção 4: Psiquiátricas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `psicoses` | Psicoses e Transtorno Bipolar | `^(F2[0-9]\|F31)` |
+| `depre_ansiedade` | Depressão e Ansiedade | `^(F3[2-49]\|F4[01])` |
+
+**Nota**: `depre_ansiedade` não entra no cálculo de multimorbidade (decisão clínica).
+
+#### Seção 5: Pulmonares
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `COPD` | DPOC | `^(I27[89]\|J4[0-4]\|J47\|J6[0-7]\|J684\|J70[13])` |
+| `asthma` | Asma | `^(J4[56])` |
+
+#### Seção 6: Neoplasias
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `neoplasia_mama` | Neoplasia de Mama | `^C50` |
+| `neoplasia_colo_uterino` | Neoplasia de Colo Uterino | `^C53` |
+| `neoplasia_feminina_estrita` | Outras Neoplasias Femininas | `^(C5[1-28])` |
+| `neoplasia_masculina_estrita` | Neoplasias Masculinas | `^(C6[0-3])` |
+| `leukemia` | Leucemia | `^(C9[1-5])` |
+| `lymphoma` | Linfoma | `^(C8[1-6]\|C96)` |
+| `metastasis` | Metástase | `^(C7[7-9]\|C80)` |
+| `neoplasia_ambos_os_sexos` | Outras Neoplasias | `^(C[0-4][0-9]\|C[567][0-9])` excluindo as específicas |
+
+#### Seção 7: Renais e Metabólicas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `IRC_por_CID` | DRC por CID | `^(I120\|I131\|N03[2-7]\|N05[2-7]\|N1[89]\|N250\|Z49[0-2]\|Z940\|Z992)` |
+| `dislipidemia_por_CID` | Dislipidemia por CID | `^E78` |
+| `obesidade` | Obesidade | `^E66` |
+| `tireoide` | Doenças da Tireoide | `^(E0[0-3]\|E05\|E06\|E890)` |
+
+#### Seção 8: Hematológicas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `coagulo` | Distúrbios de Coagulação | `^(D6[5-9])` |
+| `anemias` | Anemias | `^(D5[0-3])` |
+
+**Nota**: `anemias` não entra no cálculo de multimorbidade.
+
+#### Seção 9: Reumatológicas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `reumato` | Doenças Reumatológicas | `^(L93\|L94[013]\|M0[5-68]\|M12[03]\|M3[0-5]\|M4[5-6])` |
+
+#### Seção 10: Uso de Substâncias
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `alcool` | Transtornos por Álcool | `^(F10\|E52\|G621\|I426\|K292\|K70\|T51\|Z502\|Z714\|Z721)` |
+| `drogas` | Transtornos por Drogas | `^(F1[1-9]\|Z715\|Z722)` |
+| `tabaco` | Tabagismo | `^(F17\|Z716)` |
+
+**Nota**: `tabaco` não entra no cálculo de multimorbidade, mas é usado no Framingham.
+
+#### Seção 11: Gastrointestinais
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `peptic` | Doença Péptica | `^(K2[5-8])` |
+| `liver` | Doença Hepática | `^(B18\|I8[56]\|I982\|K70\|K71[1357]\|K72[19]\|K7[3-6]\|Z944)` |
+| `diverticular_disease` | Doença Diverticular | `^K57` |
+| `ibd` | Doença Inflamatória Intestinal | `^(K5[01])` |
+
+**Nota**: `peptic` não entra no cálculo de multimorbidade.
+
+#### Seção 12: Infecciosas
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `SIDA` | HIV/AIDS por CID | `^(B2[0-4]\|Z21\|R75\|O987\|P352)` |
+
+#### Seção 13: Outras
+
+| Campo | Condição | Padrão REGEX |
+|-------|----------|--------------|
+| `desnutricao` | Desnutrição | `^(E4[0-36])` |
+| `retardo_mental` | Deficiência Intelectual | `^(F7[0-9])` |
+| `olhos` | Doenças Oculares | `^(H18\|H201\|H2[56]\|H33\|H360\|H4[026]\|H46\|H540)` |
+| `ouvidos` | Doenças Auditivas | `^(H9[01])` |
+| `ma_formacoes` | Malformações Congênitas | `^(Q0[0-7]\|Q3[5-7]\|Q6[0-2]\|Q8[01]\|Q9[0-9])` |
+| `pele` | Doenças de Pele | `^(L1[0-49]\|L20\|L4[013]\|L80\|L89\|L90\|L990\|Q85[01])` |
+| `painful_condition` | Condições Dolorosas Crônicas | `^(R52[12]\|M79[27]\|G89[034])` |
+| `prostate_disorder` | Doenças da Próstata | `^(N4[0-2])` |
+
+### Uso no Dashboard
+- Identificação de condições crônicas
+- Cálculo de multimorbidade
+- Estratificação por condição específica
+- Índice de Charlson
+
+---
+
+## Seção 5B: Critérios Expandidos de HAS
+
+### Objetivo Clínico
+Expandir o diagnóstico de HAS além do CID, incluindo:
+1. Medidas de PA críticas (≥180/110)
+2. Medidas de PA alteradas repetidas (≥140/90 em 2 ou mais ocasiões)
+3. Uso de medicamentos anti-hipertensivos
+
+### CTEs Envolvidas
+
+#### `todas_medidas_pa`
+**Fonte**: `episodio_assistencial` + `PA_A1C_glic_cpf_fix` (correções)
+
+**Objetivo**: Consolidar todas as medidas de PA com valores corrigidos.
+
+**Campos**:
+- `cpf`
+- `pressao_sistolica`: PAS corrigida
+- `pressao_diastolica`: PAD corrigida
+- `data_medicao`
+
+#### `criterios_has_medidas`
+**Objetivo**: Identificar critérios de HAS baseados em medidas.
+
+**Campos produzidos**:
+| Campo | Descrição | Critério |
+|-------|-----------|----------|
+| `has_por_medida_critica` | Data da primeira medida crítica | PAS ≥ 180 OU PAD ≥ 110 |
+| `n_medidas_alteradas` | Contagem de medidas alteradas | PAS 140-179 OU PAD 90-109 |
+| `has_por_medidas_repetidas` | Data da 2ª medida alterada | Se n_medidas_alteradas ≥ 2 |
+
+**Lógica para 2ª medida**:
+```sql
+ARRAY_AGG(... ORDER BY data_medicao)[SAFE_OFFSET(1)]
+```
+
+#### `criterios_has_medicamentos`
+**Fonte**: `episodio_assistencial` (UNNEST de `prescricoes`)
+
+**Objetivo**: Identificar uso de anti-hipertensivos.
+
+**Padrão REGEX de anti-hipertensivos**:
+```sql
+REGEXP_CONTAINS(UPPER(presc.nome), r'(HIDROCLOROTIAZIDA|CLORTALIDONA|INDAPAMIDA|
+CAPTOPRIL|ENALAPRIL|LISINOPRIL|RAMIPRIL|PERINDOPRIL|BENAZEPRIL|
+LOSARTANA|VALSARTANA|CANDESARTANA|IRBESARTANA|OLMESARTANA|TELMISARTANA|
+ANLODIPINO|NIFEDIPINO|FELODIPINO|VERAPAMIL|DILTIAZEM|
+ATENOLOL|PROPRANOLOL|METOPROLOL|CARVEDILOL|BISOPROLOL|
+METILDOPA|CLONIDINA|HIDRALAZINA|ALISQUIRENO)')
+```
+
+**Campo produzido**:
+- `has_por_medicamento`: Data da primeira prescrição de anti-hipertensivo
+
+### Uso no Dashboard
+- Diagnóstico ampliado de HAS
+- Identificação de HAS sem CID registrado
+- Priorização de pacientes para codificação
+
+---
+
+## Seção 5C: Critérios Expandidos de DM
+
+### Objetivo Clínico
+Expandir o diagnóstico de DM além do CID, incluindo:
+1. Exames laboratoriais (glicemia ≥126 ou HbA1c ≥6.5)
+2. Progressão de pré-diabetes
+3. Uso de hipoglicemiantes
+
+### CTEs Envolvidas
+
+#### `todas_medidas_glicemia`
+**Fonte**: `episodio_assistencial` + `PA_A1C_glic_cpf_fix` (correções)
+
+**Campos**:
+- `cpf`
+- `glicemia`: Valor corrigido
+- `hba1c`: Valor corrigido
+- `data_coleta`
+- `id_hci`
+
+#### `criterios_dm_medidas`
+**Campos produzidos**:
+| Campo | Descrição | Critério |
+|-------|-----------|----------|
+| `dm_por_exames` | Data do primeiro exame diagnóstico | Glicemia ≥ 126 OU HbA1c ≥ 6.5 |
+| `n_medidas_pre_dm` | Contagem de medidas pré-DM | Glicemia 100-125 OU HbA1c 5.7-6.4 |
+| `dm_por_progressao_pre_dm` | Data da 2ª medida de pré-DM | Se n ≥ 2, confirma DM |
+| `pre_dm_por_exames` | Data da primeira medida pré-DM | Para pacientes sem DM confirmado |
+
+#### `criterios_dm_medicamentos`
+**Padrão REGEX de hipoglicemiantes FORTES** (confirmam DM):
+```sql
+REGEXP_CONTAINS(UPPER(presc.nome), r'(GLICLAZIDA|GLIBENCLAMIDA|GLIMEPIRID|GLIPIZIDA|
+REPAGLINIDA|NATEGLINIDA|PIOGLITAZONA|ROSIGLITAZONA|
+SITAGLIPTINA|VILDAGLIPTINA|SAXAGLIPTINA|LINAGLIPTINA|
+EXENATIDA|DULAGLUTIDA|LIXISENATIDA|TIRZEPATIDA|
+INSULINA|NPH|LISPRO|ASPARTE|GLULISINA|GLARGINA|DETEMIR|DEGLUDECA)')
+```
+
+**Campos produzidos**:
+- `dm_por_medicamento_forte`: Data da primeira prescrição de hipoglicemiante forte
+- `tem_apenas_metformina`: Flag booleano (metformina isolada NÃO confirma DM)
+
+**Regra importante**: Metformina isolada não confirma DM porque é usada para síndrome metabólica e SOP.
+
+### Uso no Dashboard
+- Diagnóstico ampliado de DM
+- Identificação de pré-diabéticos
+- Identificação de DM sem CID registrado
+
+---
+
+## Seção 5D: Consolidação HAS + DM
+
+### CTE: `has_dm_consolidado`
+
+**Objetivo**: Unificar todos os critérios de HAS e DM em uma única CTE, determinando a **primeira data de diagnóstico** por qualquer critério.
+
+**Lógica de consolidação HAS**:
+```sql
+HAS = MIN(has_por_cid, has_por_medida_critica, has_por_medidas_repetidas, has_por_medicamento)
+```
+Onde MIN ignora valores NULL.
+
+**Lógica de consolidação DM**:
+```sql
+DM = MIN(dm_por_cid, dm_por_exames, dm_por_progressao_pre_dm, dm_por_medicamento_forte)
+```
+**Exceção**: Se `tem_apenas_metformina = TRUE` e nenhum outro critério, DM = NULL.
+
+**Campos produzidos para HAS**:
+| Campo | Descrição |
+|-------|-----------|
+| `HAS` | Data do diagnóstico consolidado |
+| `has_por_cid` | Data do CID |
+| `has_por_medida_critica` | Data da PA crítica |
+| `has_por_medidas_repetidas` | Data da 2ª PA alterada |
+| `has_por_medicamento` | Data da prescrição |
+| `HAS_sem_CID` | TRUE se diagnosticado sem CID |
+
+**Campos produzidos para DM**:
+| Campo | Descrição |
+|-------|-----------|
+| `DM` | Data do diagnóstico consolidado |
+| `dm_por_cid` | Data do CID |
+| `dm_por_exames` | Data do exame diagnóstico |
+| `dm_por_progressao_pre_dm` | Data da progressão |
+| `dm_por_medicamento_forte` | Data da prescrição |
+| `DM_sem_CID` | TRUE se diagnosticado sem CID |
+| `pre_DM` | Data do pré-DM (se DM = NULL) |
+
+### Uso no Dashboard
+- Detalhamento da origem do diagnóstico
+- Identificação de subnotificação de CID
+- Data exata para cálculo de tempo de doença
+
+---
+
+## Seção 5E: Progressão Glicêmica
+
+### Objetivo Clínico
+Avaliar a **tendência temporal** do controle glicêmico em diabéticos, comparando HbA1c atual com anterior.
+
+### CTEs Envolvidas
+
+#### `hba1c_progressao`
+**Objetivo**: Para cada paciente, obter a HbA1c mais recente e a anterior.
+
+**Usa**: `LAG()` para capturar valor anterior.
+
+**Campos**:
+- `hba1c_atual`, `data_hba1c_atual`
+- `hba1c_anterior`, `data_hba1c_anterior`
+
+#### `progressao_glicemica`
+**Objetivo**: Classificar status e tendência do controle glicêmico.
+
+**Meta de HbA1c por idade**:
+| Idade | Meta |
+|-------|------|
+| < 60 anos | 7.0% |
+| ≥ 60 anos | 7.5% |
+
+**Status de controle** (`status_controle_glicemico`):
+
+Para pacientes **SEM DM**:
+- `rastreio - normal`: HbA1c < 5.7
+- `rastreio - pre_diabetes`: HbA1c 5.7-6.4
+- `rastreio - provável_diabetes`: HbA1c ≥ 6.5
+
+Para pacientes **COM DM**:
+- `sem_dados`: Sem HbA1c
+- `abaixo_da_meta`: Idade ≥ 70 e HbA1c < 6.0 (risco de hipoglicemia)
+- `dentro_da_meta`: HbA1c ≤ meta
+- `fora_da_meta`: HbA1c > meta
+
+**Tendência** (`tendencia_hba1c`):
+
+Para pacientes **SEM DM**: Apenas classificação de rastreio.
+
+Para pacientes **COM DM**:
+- Se **dentro/abaixo da meta**: `estavel`
+- Se **fora da meta**:
+  - `melhorando`: Queda > 0.4%
+  - `piorando`: Aumento > 0.4%
+  - `estavel`: Variação ≤ 0.4%
+  - `sem_referencia_previa`: Sem HbA1c anterior
+
+#### `historico_controle_glicemia`
+**Objetivo**: Calcular dias em cada status de controle, interpolando entre medições.
+
+**Lógica**: Para cada medição de HbA1c, calcula os dias até a próxima medição (ou até hoje se for a última). Classifica esse período como "controlado" ou "descontrolado".
+
+#### `resumo_controle_glicemia`
+**Campos produzidos**:
+| Campo | Descrição |
+|-------|-----------|
+| `dias_dm_controlado` | Total de dias controlado desde diagnóstico |
+| `dias_dm_descontrolado` | Total de dias descontrolado |
+| `dias_desde_ultima_hba1c` | Dias desde última medição |
+| `pct_dias_dm_controlado` | Percentual de dias controlado |
+| `dias_dm_controlado_365d` | Dias controlado nos últimos 365 dias |
+| `dias_dm_descontrolado_365d` | Dias descontrolado nos últimos 365 dias |
+| `pct_dias_dm_controlado_365d` | Percentual nos últimos 365 dias |
+
+#### `ultimas_medidas_glicemia`
+**Objetivo**: Gerar strings formatadas das últimas 3 medidas.
+
+**Campos**:
+- `ultimas_tres_glicemias`: Ex: "156 mg/dL; 142 mg/dL; 138 mg/dL"
+- `ultimas_tres_A1C`: Ex: "7.2%; 7.8%; 8.1%"
+
+### Uso no Dashboard
+- Cartão do paciente com histórico glicêmico
+- Identificação de pacientes piorando
+- Métricas de qualidade de controle
+
+---
+
+## Seção 5F: Progressão Pressórica
+
+### Objetivo Clínico
+Avaliar a **tendência temporal** do controle pressórico em hipertensos, análogo à progressão glicêmica.
+
+### CTEs Envolvidas
+
+#### `todas_medidas_pa_completas`
+**Objetivo**: Consolidar todas as medidas de PA com correções.
+
+#### `pa_progressao`
+**Objetivo**: Obter PA mais recente e anterior por paciente.
+
+#### `progressao_pressao`
+**Meta de PA por idade**:
+| Idade | Meta PAS | Meta PAD |
+|-------|----------|----------|
+| < 80 anos | 140 | 90 |
+| ≥ 80 anos | 150 | 90 |
+
+**Status de controle** (`status_controle_pressorio`):
+
+Para pacientes **SEM HAS**:
+- `rastreio - normal`: PAS < 120 e PAD < 80
+- `rastreio - pre_hipertensao`: PAS < 130 e PAD < 85
+- `rastreio - limítrofe`: PAS < 140 ou PAD < 90
+- `rastreio - provável_HAS`: PAS ≥ 140 ou PAD ≥ 90
+
+Para pacientes **COM HAS**:
+- `controlado`: Dentro da meta
+- `descontrolado`: Fora da meta
+
+**Tendência** (`tendencia_pa`):
+- Se **controlado**: `estavel`
+- Se **descontrolado**:
+  - `melhorando`: Queda de PAS > 5 mmHg
+  - `piorando`: Aumento de PAS > 5 mmHg
+  - `estavel`: Variação ≤ 5 mmHg
+
+#### `historico_controle_pa` e `resumo_controle_pa`
+Análogos aos de glicemia, calculando dias controlado/descontrolado.
+
+#### `ultimas_medidas_pa`
+**Campo**:
+- `ultimas_tres_PA`: Ex: "138/88 mmHg; 142/92 mmHg; 156/98 mmHg"
+
+---
+
+## Seção 6: Consultas e Longitudinalidade
+
+### Objetivo Clínico
+Avaliar o **padrão de utilização** dos serviços de saúde, identificando:
+- Volume de consultas
+- Regularidade de acompanhamento
+- Perfil de cuidado (médico vs enfermagem)
+- Longitudinalidade (consultas na unidade de cadastro vs fora)
+
+### CTEs Envolvidas
+
+#### `contagem_consultas_detalhada`
+**Fonte**: `episodio_assistencial`
+
+**Campos produzidos - Totais históricos**:
+| Campo | Descrição |
+|-------|-----------|
+| `consultas_total_historico` | Total de consultas (todo período) |
+| `consultas_medicas_historico` | Com médico |
+| `consultas_enfermagem_historico` | Com enfermeiro |
+
+**Campos produzidos - Últimos 365 dias**:
+| Campo | Descrição |
+|-------|-----------|
+| `consultas_365d` | Total nos últimos 365 dias |
+| `consultas_medicas_365d` | Com médico |
+| `consultas_enfermagem_365d` | Com enfermeiro |
+| `consultas_medicas_na_unidade_365d` | Médicas na unidade de cadastro |
+| `consultas_medicas_fora_365d` | Médicas fora da unidade |
+| `consultas_enfermagem_na_unidade_365d` | Enfermagem na unidade |
+| `consultas_enfermagem_fora_365d` | Enfermagem fora |
+
+**Campos de datas**:
+- `data_primeira_consulta`
+- `data_ultima_consulta`
+- `data_ultima_medica`
+- `data_ultima_enfermagem`
+
+**Regularidade**:
+- `meses_com_consulta_12m`: Contagem de meses distintos com consulta
+
+**Critério de especialidade**:
+```sql
+profissional_saude_responsavel.especialidade LIKE '%Médico%'
+profissional_saude_responsavel.especialidade LIKE '%Enfermeiro%'
+```
+
+#### `intervalos_consultas`
+**Objetivo**: Calcular intervalos entre consultas consecutivas.
+
+**Campos**:
+| Campo | Descrição |
+|-------|-----------|
+| `intervalo_mediano_dias` | Mediana dos intervalos |
+| `intervalo_medio_dias` | Média dos intervalos |
+| `ultimo_intervalo_dias` | Intervalo entre as 2 últimas |
+| `n_intervalos` | Número de intervalos calculados |
+
+#### `contagem_consultas`
+**Objetivo**: Consolidar e calcular indicadores derivados.
+
+**Indicadores temporais**:
+- `dias_desde_ultima_medica`
+- `dias_desde_ultima_enfermagem`
+- `dias_desde_ultima_consulta`
+- `dias_em_acompanhamento`
+
+**Percentuais**:
+- `pct_consultas_medico_365d`
+- `pct_consultas_enfermeiro_365d`
+- `pct_consultas_medicas_fora_365d`
+- `pct_consultas_medicas_na_unidade_365d`
+
+**Categorias**:
+
+`perfil_cuidado_365d`:
+- `sem_consultas`: Nenhuma consulta em 365d
+- `medico_centrado`: ≥75% consultas com médico
+- `enfermagem_centrado`: ≥75% consultas com enfermeiro
+- `compartilhado`: 25-75% com médico
+- `indefinido`: Outros casos
+
+`regularidade_acompanhamento`:
+- `sem_acompanhamento`: 0 meses
+- `esporadico`: 1-2 meses
+- `irregular`: 3-5 meses
+- `regular`: ≥6 meses
+
+`baixa_longitudinalidade`:
+- `TRUE`: >50% das consultas médicas fora da unidade de cadastro
+
+### Uso no Dashboard
+- Identificação de pacientes sem acompanhamento
+- Avaliação de longitudinalidade
+- Comparação com benchmarks
+
+---
+
+## Seção 7: Consolidação com eGFR
+
+### CTE: `dados_consolidados`
+
+**Objetivo**: JOIN de todas as CTEs anteriores + cálculo de eGFR.
+
+### Cálculo do eGFR (CKD-EPI 2021)
+
+**Fórmula**:
+```sql
+142 *
+POWER(
+    LEAST(creatinina / CASE WHEN genero = 'feminino' THEN 0.7 ELSE 0.9 END, 1),
+    CASE WHEN genero = 'feminino' THEN -0.241 ELSE -0.302 END
+) *
+POWER(
+    GREATEST(creatinina / CASE WHEN genero = 'feminino' THEN 0.7 ELSE 0.9 END, 1),
+    -1.200
+) *
+POWER(0.9938, idade) *
+CASE WHEN genero = 'feminino' THEN 1.012 ELSE 1.0 END
+```
+
+**Nota**: Esta é a fórmula CKD-EPI 2021 **sem ajuste racial** (recomendação atual).
+
+### Estadiamento CKD (`ckd_stage`)
+
+| eGFR (ml/min/1.73m²) | Estágio |
+|----------------------|---------|
+| ≥ 90 | G1 - Normal ou alta |
+| 60-89 | G2 - Levemente diminuída |
+| 30-59 | G3 - Moderadamente diminuída |
+| 15-29 | G4 - Severamente diminuída |
+| < 15 | G5 - Falência renal |
+| NULL | Não avaliado |
+
+---
+
+## Seção 7A: Morbidades Consolidadas
+
+### Objetivo
+Consolidar morbidades que têm **múltiplas fontes de diagnóstico**.
+
+### CTEs Envolvidas
+
+#### `dados_com_irc`
+**Objetivo**: Unificar IRC (CID ou eGFR).
+
+**Regra**:
+```sql
+IRC = IRC_por_CID
+  OU (eGFR indica G3/G4/G5 E IRC_por_CID é NULL) → usar data_creatinina
+```
+
+#### `dados_com_hiv`
+**Objetivo**: Unificar HIV (CID ou base externa).
+
+**Regra**:
+```sql
+HIV = MENOR(SIDA, data_diagnostico_hiv)
+```
+
+#### `dados_com_dislipidemia`
+**Objetivo**: Classificar perfil lipídico e unificar dislipidemia.
+
+**Classificações ATP III**:
+
+| Exame | Classificação | Valor |
+|-------|---------------|-------|
+| Colesterol Total | Desejável | < 200 |
+| | Limítrofe alto | 200-239 |
+| | Alto | ≥ 240 |
+| LDL | Ótimo | < 100 |
+| | Acima do ótimo | 100-129 |
+| | Limítrofe alto | 130-159 |
+| | Alto | 160-189 |
+| | Muito alto | ≥ 190 |
+| HDL | Baixo | < 40 (M) / < 50 (F) |
+| | Normal | 40-59 (M) / 50-59 (F) |
+| | Desejável (protetor) | ≥ 60 |
+| Triglicerídeos | Normal | < 150 |
+| | Limítrofe alto | 150-199 |
+| | Alto | 200-499 |
+| | Muito alto | ≥ 500 |
+
+**Critérios de dislipidemia laboratorial**:
+- `dislipidemia_por_CT`: CT ≥ 200
+- `dislipidemia_por_LDL`: LDL ≥ 130
+- `dislipidemia_por_HDL_baixo`: HDL < 40 (M) ou < 50 (F)
+- `dislipidemia_por_TG`: TG ≥ 150
+
+**Dislipidemia unificada**:
+```sql
+dislipidemia = MENOR(dislipidemia_por_CID, data do primeiro exame alterado)
+```
+
+---
+
+## Seção 7B: Multimorbidade
+
+### CTE: `morbidades_array`
+
+**Objetivo**: Contar morbidades e identificar data da multimorbidade.
+
+**Morbidades incluídas no cálculo** (33 condições):
+
+1. HAS, DM
+2. CI, ICC, stroke, arritmia, valvular, circ_pulm, vascular_periferica
+3. epilepsy, parkinsonism, multiple_sclerosis, neuro, dementia, plegia
+4. psicoses (depre_ansiedade EXCLUÍDA)
+5. COPD, asthma
+6. neoplasia_mama, neoplasia_colo_uterino, neoplasia_feminina_estrita, neoplasia_masculina_estrita, leukemia, lymphoma, metastasis, neoplasia_ambos_os_sexos
+7. IRC, dislipidemia, obesidade, tireoide
+8. coagulo (anemias EXCLUÍDA)
+9. reumato
+10. alcool, drogas (tabaco EXCLUÍDO)
+11. liver, diverticular_disease, ibd (peptic EXCLUÍDA)
+12. HIV
+
+**Campos produzidos**:
+| Campo | Descrição |
+|-------|-----------|
+| `total_morbidades` | Contagem de morbidades distintas |
+| `multimorbidade` | Data da 2ª morbidade (quando se torna multimórbido) |
+| `eh_multimorbido` | TRUE se total_morbidades ≥ 2 |
+
+**Deduplicação**: `COUNT(DISTINCT data)` e `ARRAY_AGG(DISTINCT data)` para evitar contagem dupla de morbidades diagnosticadas na mesma data.
+
+---
+
+## Seção 8: Prescrições de Medicamentos
+
+### CTE: `ultimas_prescricoes_medicamentos`
+
+**Objetivo**: Identificar a data da última prescrição de cada classe terapêutica relevante.
+
+### Classes Terapêuticas e Padrões REGEX
+
+| Campo | Classe | Padrão REGEX |
+|-------|--------|--------------|
+| `data_ultima_AAS` | Antiagregante | `ASPIRINA\|AAS\|ACIDO ACETILSALICILICO\|ÁCIDO ACETILSALICÍLICO\|SOMALGIN\|ASPIRINA PREVENT\|ECASIL` |
+| `data_ultima_anticoag` | Anticoagulantes | `VARFARINA\|WARFARIN\|MAREVAN\|COUMADIN\|RIVAROXABAN\|XARELTO\|APIXABAN\|ELIQUIS\|DABIGATRAN\|PRADAXA\|EDOXABAN\|LIXIANA` |
+| `data_ultima_estatina_alta` | Estatina alta intensidade | `ATORVASTATINA.*[4-8]0\|ROSUVASTATINA.*[2-4]0` |
+| `data_ultima_estatina_qualquer` | Qualquer estatina | `ATORVASTATINA\|ROSUVASTATINA\|SINVASTATINA\|PRAVASTATINA\|LOVASTATINA\|FLUVASTATINA\|PITAVASTATINA` |
+| `data_ultima_SGLT2` | Inibidores SGLT-2 | `DAPAGLIFLOZINA\|FORXIGA\|EMPAGLIFLOZINA\|JARDIANCE\|CANAGLIFLOZINA\|INVOKANA\|SOTAGLIFLOZINA` |
+| `data_ultima_BB` | Betabloqueadores | `METOPROLOL.*SUCCINATO\|CARVEDILOL\|BISOPROLOL\|COREG\|CONCOR\|SELOZOK.*ZOK` |
+| `data_ultima_IECA` | IECA | `CAPTOPRIL\|ENALAPRIL\|LISINOPRIL\|RAMIPRIL\|PERINDOPRIL\|BENAZEPRIL\|FOSINOPRIL\|QUINAPRIL\|TRANDOLAPRIL` |
+| `data_ultima_BRA` | BRA | `LOSARTANA\|VALSARTANA\|CANDESARTANA\|IRBESARTANA\|OLMESARTANA\|TELMISARTANA\|AZILSARTANA\|EPROSARTANA` |
+| `data_ultima_INRA` | INRA (Sacubitril) | `SACUBITRIL\|ENTRESTO` |
+| `data_ultima_diuretico_alca` | Diurético de alça | `FUROSEMIDA\|BUMETANIDA\|TORASEMIDA\|LASIX` |
+| `data_ultima_ARM` | Antagonista Mineralocorticoide | `ESPIRONOLACTONA\|ALDACTONE\|EPLERENONA\|INSPRA` |
+| `data_ultima_BCC_nao_DHP` | BCC não-dihidropiridínico | `VERAPAMIL\|DILTIAZEM\|CARDIZEM` |
+| `data_ultima_AINE` | Anti-inflamatórios | `IBUPROFENO\|DICLOFENACO\|NAPROXENO\|CETOPROFENO\|PIROXICAM\|MELOXICAM\|NIMESULIDA\|INDOMETACINA\|ACECLOFENACO` |
+| `data_ultima_hidralazina` | Hidralazina | `HIDRALAZINA` |
+| `data_ultima_nitrato` | Nitratos | `ISOSSORBIDA\|MONONITRATO\|DINITRATO\|PROPATILNITRATO` |
+| `data_ultima_digoxina` | Digoxina | `DIGOXINA\|LANOXIN` |
+
+### Uso no Dashboard
+- Identificação de lacunas de prescrição
+- Detecção de combinações inadequadas
+- Avaliação de adesão a guidelines
+
+---
+
+## Seção 9: Exames Solicitados
+
+### CTE: `exames_solicitados_365d`
+
+**Fonte**: `brutos_prontuario_vitacare.atendimento` (campo `exames_solicitados`)
+
+**Objetivo**: Verificar se exames essenciais foram solicitados nos últimos 365 dias.
+
+### Exames Monitorados
+
+| Campo (tem_X_365d) | Campo (data_solicitacao_X) | Padrão REGEX |
+|--------------------|----------------------------|--------------|
+| `tem_creatinina_365d` | `data_solicitacao_creatinina` | `CREATININA` |
+| `tem_colesterol_365d` | `data_solicitacao_colesterol` | `COLESTEROL\|HDL\|LDL\|TRIGLICERID` |
+| `tem_eas_365d` | `data_solicitacao_eas` | `URINA\|CARACTERES\|SEDIMENTO\|EAS` |
+| `tem_ecg_365d` | `data_solicitacao_ecg` | `ELETROCARDIOGRAMA\|ECG` |
+| `tem_hba1c_solicitado_365d` | `data_solicitacao_hba1c` | `HEMOGLOBINA.*GLICO\|HEMOGLOBINA.*GLICADA\|HBA1C` |
+| `tem_glicemia_365d` | `data_solicitacao_glicemia` | `GLICOSE\|GLICEMIA` |
+| `tem_microalbuminuria_365d` | `data_solicitacao_microalbuminuria` | `MICROALBUMIN` |
+| `tem_hemograma_365d` | `data_solicitacao_hemograma` | `HEMOGRAMA` |
+
+---
+
+## Seção 10: Exame do Pé Diabético
+
+### CTE: `exame_pe_diabetico`
+
+**Fonte**: `brutos_prontuario_vitacare.atendimento` (campo `soap_plano_procedimentos_clinicos`)
+
+**Padrão REGEX**:
+```sql
+REGEXP_CONTAINS(UPPER(...), r'EXAME.*PÉ.*DIABÉTICO|PÉ.*DIABÉTICO')
+```
+
+**Campos produzidos**:
+| Campo | Descrição |
+|-------|-----------|
+| `teve_exame_pe_365d` | TRUE se teve nos últimos 365 dias |
+| `teve_exame_pe_180d` | TRUE se teve nos últimos 180 dias |
+| `data_ultimo_exame_pe` | Data do último exame |
+| `dias_desde_ultimo_exame_pe` | Dias desde o último |
+
+---
+
+## Seção 11: Escore de Framingham
+
+### Objetivo Clínico
+Calcular o **risco cardiovascular em 10 anos** usando o escore de Framingham tradicional.
+
+### CTE: `pontuacao_framingham`
+
+**Componentes pontuados**:
+
+#### Pontos por Idade (Masculino)
+| Faixa | Pontos |
+|-------|--------|
+| 30-34 | -1 |
+| 35-39 | 0 |
+| 40-44 | 1 |
+| 45-49 | 2 |
+| 50-54 | 3 |
+| 55-59 | 4 |
+| 60-64 | 5 |
+| 65-69 | 6 |
+| 70-74 | 7 |
+| ≥75 | 8 |
+
+#### Pontos por Idade (Feminino)
+| Faixa | Pontos |
+|-------|--------|
+| 30-34 | -9 |
+| 35-39 | -4 |
+| 40-44 | 0 |
+| 45-49 | 3 |
+| 50-54 | 6 |
+| 55-59 | 7 |
+| 60-64 | 8 |
+| ≥65 | 8 |
+
+#### Pontos por Colesterol Total
+| CT (mg/dL) | Masculino | Feminino |
+|------------|-----------|----------|
+| < 160 | -3 | -2 |
+| 160-199 | 0 | 0 |
+| 200-239 | 1 | 1 |
+| 240-279 | 2 | 1 |
+| ≥ 280 | 3 | 3 |
+
+#### Pontos por HDL
+| HDL (mg/dL) | Masculino | Feminino |
+|-------------|-----------|----------|
+| < 35 | 2 | 5 |
+| 35-44 | 1 | 2 |
+| 45-49 | 0 | 1 |
+| 50-59 | 0 | 0 |
+| ≥ 60 | -1 | -2 |
+
+#### Pontos por PAS (sem tratamento)
+| PAS (mmHg) | Masculino | Feminino |
+|------------|-----------|----------|
+| < 120 | 0 | -3 |
+| 120-129 | 0 | 0 |
+| 130-139 | 1 | 1 |
+| 140-159 | 2 | 2 |
+| ≥ 160 | 3 | 4 |
+
+#### Pontos por PAS (com tratamento/HAS)
+| PAS (mmHg) | Masculino | Feminino |
+|------------|-----------|----------|
+| < 120 | 0 | -1 |
+| 120-129 | 2 | 2 |
+| 130-139 | 3 | 3 |
+| 140-159 | 4 | 5 |
+| ≥ 160 | 5 | 6 |
+
+#### Pontos por Diabetes
+| Gênero | Pontos |
+|--------|--------|
+| Masculino | 2 |
+| Feminino | 4 |
+
+#### Pontos por Tabagismo
+| | Pontos |
+|-|--------|
+| Ambos | 2 |
+
+### CTE: `risco_calculado`
+
+**Campos produzidos**:
+- `pontos_totais`: Soma de todos os componentes
+- `percentual_risco_10_anos`: Risco em % (tabela de conversão)
+
+**Tabela de conversão (Masculino)**:
+| Pontos | Risco % |
+|--------|---------|
+| ≤ -3 | 1.0 |
+| -2 | 1.1 |
+| ... | ... |
+| 17 | 29.4 |
+| ≥ 18 | 30.0 |
+
+---
+
+## Seção 12: Risco Cardiovascular - Estratificação SBC
+
+### CTE: `risco_cardiovascular_estratificado`
+
+### Objetivo
+Reclassificar o risco cardiovascular segundo diretrizes da **Sociedade Brasileira de Cardiologia**, que considera condições clínicas que elevam automaticamente o risco.
+
+### Categorias de Risco
+
+| Categoria | Critérios |
+|-----------|-----------|
+| **MUITO ALTO** | CI, stroke ou vascular_periferica (aterosclerose significativa) |
+| **ALTO** | IRC, eGFR < 60, ou LDL ≥ 190 |
+| **INTERMEDIÁRIO** | DM sem aterosclerose, ou Framingham 5-20% (M) / 5-10% (F) |
+| **BAIXO** | Framingham < 5% |
+
+### Campos Produzidos
+
+| Campo | Descrição |
+|-------|-----------|
+| `tipo_estratificacao` | "reclassificado_muito_alto", "reclassificado_alto", "diabetes_avaliar_framingham", "usar_framingham" |
+| `percentual_risco_final` | Risco formatado (ex: ">30%", "12.5%") |
+| `categoria_risco_final` | "MUITO ALTO", "ALTO", "INTERMEDIÁRIO", "BAIXO", "NÃO CLASSIFICADO" |
+| `motivo_reclassificacao` | Texto explicativo da reclassificação |
+| `variaveis_usadas_calculo` | Lista de variáveis disponíveis |
+| `variaveis_ausentes_calculo` | Lista de variáveis faltantes |
+
+---
+
+## Seção 13: Índice de Charlson
+
+### Objetivo Clínico
+Calcular o **Charlson Comorbidity Index modificado**, incluindo pontuação por idade e polifarmácia.
+
+### CTE: `charlson_componentes`
+
+### Pesos por Morbidade
+
+| Peso | Condições |
+|------|-----------|
+| 1 | CI, ICC, vascular_periferica, dementia, COPD, peptic, DM sem IRC, alcool, arritmia, psicoses, HIV |
+| 2 | DM com IRC, plegia, IRC sem DM, neoplasias sólidas, leukemia, lymphoma |
+| 3 | liver (doença hepática) |
+| 6 | metastasis |
+
+### Pontos por Idade
+
+| Faixa | Pontos |
+|-------|--------|
+| < 40 | 0 |
+| 40-49 | 1 |
+| 50-59 | 2 |
+| 60-69 | 3 |
+| 70-79 | 4 |
+| ≥ 80 | 5 |
+
+### CTE: `charlson_final`
+
+**JOIN com**: `MM_mantidos_alterados_ultimas` (tabela de medicamentos crônicos)
+
+### Pontos por Polifarmácia
+
+| Medicamentos crônicos | Pontos |
+|----------------------|--------|
+| 0-4 | 0 |
+| 5-9 (polifarmácia) | 1 |
+| ≥ 10 (hiperpolifarmácia) | 2 |
+
+### Campos Produzidos
+
+| Campo | Descrição |
+|-------|-----------|
+| `charlson_pontos_morbidades` | Pontos das comorbidades |
+| `charlson_pontos_idade` | Pontos da idade |
+| `charlson_pontos_polifarmacia` | Pontos da polifarmácia |
+| `charlson_score` | Score total |
+| `charlson_categoria` | "Baixo" (≤2), "Moderado" (3-6), "Alto" (7-9), "Muito Alto" (≥10) |
+| `total_medicamentos_cronicos` | Contagem de medicamentos |
+| `nucleo_cronico_atual` | Lista de medicamentos normalizados |
+| `polifarmacia` | TRUE se 5-9 medicamentos |
+| `hiperpolifarmacia` | TRUE se ≥10 medicamentos |
+
+---
+
+## Seção 14: Benchmark de Consultas
+
+### CTE: `benchmark_consultas`
+
+### Objetivo
+Criar **grupos de referência** para comparação de padrões de consulta.
+
+### Estratificação
+
+| Dimensão | Categorias |
+|----------|------------|
+| Faixa etária | <40, 40-59, 60-79, 80+ |
+| Gênero | masculino, feminino |
+| Risco Charlson | baixo (≤2), moderado (3-6), alto (≥7) |
+
+### Métricas Calculadas por Grupo
+
+- `percentis_consultas_365d`: Array com P25, P50, P75, P100
+- `percentis_intervalo_mediano`: Array com P25, P50, P75, P100
+- `media_consultas_365d`: Média de consultas no grupo
+- `media_intervalo_mediano`: Média do intervalo no grupo
+- `n_pacientes_grupo`: Tamanho do grupo de referência
+
+### Uso no SELECT Final
+
+Comparação individual vs grupo:
+- `percentil_intervalo_vs_grupo`: "abaixo_p25", "p25_p50", "p50_p75", "acima_p75"
+- `percentil_consultas_vs_grupo`: Idem
+
+Flags de inequidade:
+- `alto_risco_baixo_acesso`: Charlson ≥7 e consultas < P25 do grupo
+- `baixo_risco_alto_acesso`: Charlson ≤2 e consultas > P75 do grupo
+- `alto_risco_intervalo_longo`: Charlson ≥7 e intervalo > P75 do grupo
+
+---
+
+## Glossário de Lacunas de Cuidado
+
+### Definição
+Lacunas de cuidado são **indicadores booleanos** que identificam situações onde o cuidado não está alinhado com guidelines ou boas práticas.
+
+### Categoria 2: Cardiopatia Isquêmica
+
+| Lacuna | Descrição | Critério | Prazo |
+|--------|-----------|----------|-------|
+| `lacuna_CI_sem_AAS` | CI sem antiagregação | CI presente E sem AAS há >365d E sem anticoag há >365d | 365 dias |
+| `lacuna_CI_sem_estatina_alta` | CI sem estatina de alta intensidade | CI presente E sem estatina alta há >365d | 365 dias |
+| `lacuna_CI_sem_estatina_qualquer` | CI sem nenhuma estatina | CI presente E sem estatina há >365d | 365 dias |
+| `lacuna_CI_ICC_sem_BB` | CI+ICC sem betabloqueador | CI E ICC E sem BB há >365d | 365 dias |
+
+### Categoria 3: ICC e Uso Inadequado
+
+| Lacuna | Descrição | Critério | Prazo |
+|--------|-----------|----------|-------|
+| `lacuna_ICC_sem_SGLT2` | ICC sem iSGLT2 | ICC presente E sem SGLT2 há >365d | 365 dias |
+| `lacuna_ICC_sem_IECA_BRA` | ICC sem bloqueio SRAA | ICC E sem IECA há >365d E sem BRA há >365d | 365 dias |
+| `lacuna_ICC_sem_INRA` | ICC sem sacubitril | ICC E sem INRA há >365d | 365 dias |
+| `lacuna_IECA_BRA_concomitante` | Uso inadequado IECA+BRA | IECA há ≤180d E BRA há ≤180d | - |
+| `lacuna_diur_alca_sem_ICC` | Diurético de alça sem ICC | Sem ICC E diurético alça há ≤180d | - |
+| `lacuna_ICC_sem_ARM` | ICC sem espironolactona | ICC E sem ARM há >365d | 365 dias |
+| `lacuna_ICC_INRA_IECA_concomitante` | Combinação perigosa | ICC E INRA há ≤180d E IECA há ≤180d | - |
+| `lacuna_ICC_uso_BCC_nao_DHP` | BCC contraindicado em ICC | ICC E BCC não-DHP há ≤180d | - |
+| `lacuna_ICC_uso_AINE` | AINE inadequado em ICC | ICC E AINE há ≤180d | - |
+| `lacuna_IRC_sem_SGLT2` | IRC sem iSGLT2 | IRC E sem SGLT2 há >365d | 365 dias |
+| `lacuna_DM_complicado_sem_SGLT2` | DM complicado sem iSGLT2 | DM E (ICC ou IRC ou CI) E sem SGLT2 há >365d | 365 dias |
+| `lacuna_IRC_sem_iECA_ou_BRA` | IRC sem bloqueio SRAA | IRC E sem IECA há >365d E sem BRA há >365d | 365 dias |
+| `lacuna_ICC_sem_SRAA_e_sem_hidralazina_nitrato` | ICC sem vasodilatador | ICC E sem IECA/BRA/INRA há >365d E sem hidralazina/nitrato há >365d | 365 dias |
+
+### Categoria 4: Fibrilação Atrial
+
+| Lacuna | Descrição | Critério | Prazo |
+|--------|-----------|----------|-------|
+| `lacuna_FA_sem_anticoagulacao` | FA sem anticoagulação | arritmia E sem anticoag há >365d | 365 dias |
+| `lacuna_FA_sem_controle_FC` | FA sem controle de frequência | arritmia E sem BB há >365d E sem digoxina há >365d | 365 dias |
+| `lacuna_FA_ICC_sem_digoxina` | FA+ICC sem digoxina | arritmia E ICC E sem digoxina há >365d | 365 dias |
+
+### Categoria 6: Diabetes
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_DM_sem_HbA1c_recente` | DM sem monitoramento | DM E (HbA1c NULL ou dias_desde >180) |
+| `lacuna_DM_descontrolado` | DM fora da meta | DM E HbA1c > meta (ajustada por idade) E HbA1c recente |
+| `DM_controlado` | Flag positivo | DM E HbA1c ≤ meta E HbA1c recente |
+| `DM_piorando` | Tendência negativa | DM E aumento HbA1c > 0.5% E intervalo ≥90d |
+| `DM_melhorando` | Tendência positiva | DM E redução HbA1c > 0.5% E intervalo ≥90d |
+
+### Lacunas de Exames Laboratoriais
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_creatinina_HAS_DM` | Sem creatinina | (HAS ou DM) E sem creatinina solicitada 365d |
+| `lacuna_colesterol_HAS_DM` | Sem perfil lipídico | (HAS ou DM) E sem colesterol solicitado 365d |
+| `lacuna_eas_HAS_DM` | Sem EAS | (HAS ou DM) E sem EAS solicitado 365d |
+| `lacuna_ecg_HAS_DM` | Sem ECG | (HAS ou DM) E sem ECG solicitado 365d |
+| `lacuna_DM_hba1c_nao_solicitado` | DM sem HbA1c solicitada | DM E sem HbA1c solicitada 365d |
+| `lacuna_DM_microalbuminuria_nao_solicitado` | DM sem microalbuminúria | DM E sem microalbuminúria solicitada 365d |
+
+### Lacunas de Medidas
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_IMC_HAS_DM` | IMC não calculável | (HAS ou DM) E (altura NULL ou peso NULL) |
+
+### Lacunas de Controle Pressórico
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_rastreio_PA_adulto` | Adulto sem rastreio PA | idade ≥18 E sem HAS E sem PA há >365d |
+| `lacuna_PA_hipertenso_180d` | Hipertenso sem PA | HAS E sem PA há >180d |
+| `lacuna_HAS_descontrolado_menor80` | HAS <80a descontrolado | HAS E idade <80 E PA ≥140/90 |
+| `lacuna_HAS_descontrolado_80mais` | HAS ≥80a descontrolado | HAS E idade ≥80 E PA ≥150/90 |
+| `lacuna_DM_HAS_PA_descontrolada` | DM+HAS PA >135/80 | DM E HAS E PA >135/80 |
+
+### Lacunas de Rastreio DM
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_rastreio_DM_hipertenso` | Hipertenso sem rastreio DM | HAS E sem DM E sem glicemia/HbA1c há >365d |
+| `lacuna_rastreio_DM_45mais` | ≥45a sem rastreio DM | idade ≥45 E sem DM E sem glicemia/HbA1c há >3 anos |
+
+### Lacunas de Pé Diabético
+
+| Lacuna | Descrição | Critério |
+|--------|-----------|----------|
+| `lacuna_DM_sem_exame_pe_365d` | DM sem exame pé 365d | DM E sem exame pé há >365d |
+| `lacuna_DM_sem_exame_pe_180d` | DM sem exame pé 180d | DM E sem exame pé há >180d |
+| `lacuna_DM_nunca_teve_exame_pe` | DM >1a nunca teve exame | DM há >1 ano E nunca teve exame pé |
+
+---
+
+## Referências Clínicas
+
+### Framingham Risk Score
+- Wilson PWF, et al. Prediction of Coronary Heart Disease Using Risk Factor Categories. Circulation. 1998.
+
+### Estratificação SBC
+- Diretrizes Brasileiras de Dislipidemias e Prevenção da Aterosclerose - 2017
+
+### CKD-EPI 2021
+- Inker LA, et al. New Creatinine- and Cystatin C-Based Equations to Estimate GFR without Race. NEJM. 2021.
+
+### ATP III (Dislipidemia)
+- Executive Summary of The Third Report of The National Cholesterol Education Program (NCEP). JAMA. 2001.
+
+### Charlson Comorbidity Index
+- Charlson ME, et al. A new method of classifying prognostic comorbidity in longitudinal studies. J Chronic Dis. 1987.
+- Quan H, et al. Updating and Validating the Charlson Comorbidity Index. J Clin Epidemiol. 2011.
+
+### Metas de Controle
+- Diretrizes SBC para Hipertensão Arterial - 2020
+- Diretrizes SBD para Diabetes Mellitus - 2022
+- KDIGO Guidelines for CKD - 2024
+
+---
+
+## Ordenação Final
+
+O SELECT final ordena os pacientes por prioridade clínica:
+
+```sql
+ORDER BY 
+    CASE risco_cardiovascular  
+        WHEN 'MUITO ALTO' THEN 1
+        WHEN 'ALTO' THEN 2
+        WHEN 'INTERMEDIÁRIO' THEN 3
+        WHEN 'BAIXO' THEN 4
+        ELSE 5
+    END,
+    percentual_risco_10_anos DESC NULLS LAST
+```
+
+**Lógica**: Pacientes de maior risco cardiovascular aparecem primeiro, e dentro de cada categoria, ordenados pelo percentual de risco decrescente.
+
+---
+
+## Metadados
+
+| Campo | Valor |
+|-------|-------|
+| `data_calculo` | Data de execução da query |
+| Granularidade | 1 linha por CPF |
+| Atualização | Sob demanda |
+
+---
+
+*Documentação gerada em novembro de 2025*
+*Navegador Clínico - Multimorbidade | SMS-RJ*

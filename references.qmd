@@ -1,8 +1,7 @@
 # References {.unnumbered}
 
-::: {#refs}
-:::
-
 A tabela morbidades está aqui - `rj-sms-sandbox.sub_pav_us.morbidades_20251015`
 
 A tabela Morbidades agregadas está aqui - `rj-sms-sandbox.sub_pav_us.morbidades_agregadas`
+
+# Passo a passo para organização dos dados e tabelas

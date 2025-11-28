@@ -1,3 +1,5 @@
 # Consolidado de Morbidades {.unnumbered}
 
 Aqui estão as informações sobre as morbidades crônicas avaliadas junto aos pacientes, Multimorbidade e seus critérios, polifarmácia e hiperpolifarmácia (e seus critérios), bem como números absolutos e prevalências por grupo etári, sexo, ESF, clínica da família e área programática.
+
+Atualizado em 27 de novembro de 2025.
